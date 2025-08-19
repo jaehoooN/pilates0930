@@ -1,0 +1,28 @@
+{
+  "name": "pilates-auto-booking",
+  "version": "3.0.0",
+  "description": "에이디기구필라테스 자동 예약 시스템 (개선된 버전)",
+  "main": "booking-script.js",
+  "scripts": {
+    "test": "node test-script.js",
+    "test:dry": "TEST_MODE=dry-run node test-script.js",
+    "test:real": "TEST_MODE=real node test-script.js",
+    "book": "node booking-script.js",
+    "book:test": "TEST_MODE=true node booking-script.js"
+  },
+  "dependencies": {
+    "puppeteer": "^21.0.0",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "pilates",
+    "booking",
+    "automation",
+    "puppeteer"
+  ],
+  "author": "",
+  "license": "MIT"
+}
