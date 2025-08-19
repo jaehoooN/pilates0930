@@ -1,0 +1,180 @@
+name: 🏋️ 필라테스 자동 예약
+
+on:
+  schedule:
+    # 한국시간 매일 00:00 (UTC 15:00)
+    # 정각에 실행하되, 주말은 스크립트에서 자동 스킵
+    - cron: '0 15 * * *'  # 정확히 자정에 실행하도록 수정
+  
+  workflow_dispatch:
+    inputs:
+      test_mode:
+        description: '테스트 모드 (실제 예약하지 않음)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      force_weekend:
+        description: '주말에도 강제 실행 (테스트용)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+jobs:
+  check-weekday:
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      target_date: ${{ steps.check.outputs.target_date }}
+      day_name: ${{ steps.check.outputs.day_name }}
+    steps:
+    - name: 📅 주말 체크 (KST 기준) - 수정됨
+      id: check
+      run: |
+        # 현재 UTC 시간을 KST로 변환하여 7일 후 계산
+        echo "현재 UTC: $(date -u)"
+        
+        # KST 기준 현재 시간 (UTC + 9시간)
+        current_kst=$(TZ='Asia/Seoul' date)
+        echo "현재 KST: $current_kst"
+        
+        # KST 기준 현재 요일 확인
+        current_day=$(TZ='Asia/Seoul' date '+%u')
+        current_day_name=$(TZ='Asia/Seoul' date '+%A')
+        echo "현재 요일: $current_day_name (숫자: $current_day)"
+        
+        # KST 기준 7일 후 날짜 계산
+        target_date=$(TZ='Asia/Seoul' date -d '+7 days' '+%Y-%m-%d')
+        target_day=$(TZ='Asia/Seoul' date -d '+7 days' '+%u') # 1=월요일, 7=일요일
+        day_name_en=$(TZ='Asia/Seoul' date -d '+7 days' '+%A')
+        
+        # 한국어 요일 변환
+        case $day_name_en in
+          "Monday") day_name="월요일" ;;
+          "Tuesday") day_name="화요일" ;;
+          "Wednesday") day_name="수요일" ;;
+          "Thursday") day_name="목요일" ;;
+          "Friday") day_name="금요일" ;;
+          "Saturday") day_name="토요일" ;;
+          "Sunday") day_name="일요일" ;;
+          *) day_name=$day_name_en ;;
+        esac
+        
+        echo "🎯 예약 대상 날짜: $target_date ($day_name)"
+        echo "📊 예약 대상 요일 번호: $target_day (1=월, 2=화, 3=수, 4=목, 5=금, 6=토, 7=일)"
+        
+        # 주말 체크 수정: 6=토요일, 7=일요일만 주말로 판정
+        if [ "$target_day" -eq 6 ] || [ "$target_day" -eq 7 ]; then
+          if [ "${{ github.event.inputs.force_weekend }}" = "true" ]; then
+            echo "⚠️ 주말($day_name)이지만 강제 실행 모드"
+            should_run="true"
+          else
+            echo "🚫 주말($day_name)이므로 예약 건너뛰기"
+            should_run="false"
+          fi
+        else
+          echo "✅ 평일($day_name)이므로 예약 진행"
+          should_run="true"
+        fi
+        
+        # 디버깅을 위한 추가 정보
+        echo "🔍 디버깅 정보:"
+        echo "   - 현재 KST 요일: $current_day ($current_day_name)"
+        echo "   - 예약 대상 요일: $target_day ($day_name)"
+        echo "   - 실행 여부: $should_run"
+        
+        echo "should_run=$should_run" >> $GITHUB_OUTPUT
+        echo "target_date=$target_date" >> $GITHUB_OUTPUT
+        echo "day_name=$day_name" >> $GITHUB_OUTPUT
+
+  booking:
+    needs: check-weekday
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: needs.check-weekday.outputs.should_run == 'true'
+    
+    steps:
+    - name: 📥 코드 체크아웃
+      uses: actions/checkout@v4
+    
+    - name: 📦 Node.js 설정
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: 🔧 의존성 설치
+      run: npm install
+    
+    - name: 🎯 예약 실행
+      env:
+        PILATES_USERNAME: ${{ secrets.PILATES_USERNAME }}
+        PILATES_PASSWORD: ${{ secrets.PILATES_PASSWORD }}
+        TEST_MODE: ${{ github.event.inputs.test_mode }}
+        NODE_ENV: production
+        HEADLESS: true
+      run: |
+        echo "🎯 예약 대상: ${{ needs.check-weekday.outputs.target_date }} (${{ needs.check-weekday.outputs.day_name }})"
+        echo "🕐 실행 시간: $(TZ='Asia/Seoul' date)"
+        node booking-script.js
+      continue-on-error: true
+    
+    - name: 📊 결과 확인
+      id: check-result
+      if: always()
+      run: |
+        echo "📊 예약 결과 확인 중..."
+        if [ -f "booking-result.json" ]; then
+          echo "✅ 결과 파일 발견"
+          echo "📄 결과 내용:"
+          cat booking-result.json
+          
+          # 결과에서 상태 추출
+          status=$(jq -r '.status // "UNKNOWN"' booking-result.json)
+          echo "📈 예약 상태: $status"
+          
+          case $status in
+            "SUCCESS"|"WAITING"|"ALREADY_BOOKED"|"WEEKEND_SKIP")
+              echo "✅ 정상 완료: $status"
+              ;;
+            "TEST")
+              echo "🧪 테스트 모드 완료"
+              ;;
+            *)
+              echo "⚠️ 예상치 못한 상태: $status"
+              ;;
+          esac
+        else
+          echo "❌ 결과 파일 없음"
+        fi
+    
+    - name: 📸 결과 저장
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: booking-result-${{ github.run_number }}
+        path: |
+          screenshots/
+          logs/
+          *.json
+        if-no-files-found: warn
+        retention-days: 30
+
+  weekend-skip:
+    needs: check-weekday
+    runs-on: ubuntu-latest
+    if: needs.check-weekday.outputs.should_run == 'false'
+    
+    steps:
+    - name: 🚫 주말 스킵 알림
+      run: |
+        echo "🚫 주말 예약 스킵"
+        echo "📅 예약 대상 날짜: ${{ needs.check-weekday.outputs.target_date }}"
+        echo "📆 요일: ${{ needs.check-weekday.outputs.day_name }}"
+        echo "⏭️ 다음 평일에 자동 실행됩니다."
+        echo "🕐 현재 KST: $(TZ='Asia/Seoul' date)"
+        echo "🔍 주말 판정: 토요일(6) 또는 일요일(7)만 주말로 처리"
