@@ -298,8 +298,9 @@ class PilatesBooking {
         return { year, month, day };
     }
 
-    async find1030ClassAndBook(page) {
-        await this.log('🔍 10:30 수업 찾는 중...');
+    // 09:30 수업 찾기 및 예약하기 (10:30에서 09:30으로 수정)
+    async find0930ClassAndBook(page) {
+        await this.log('🔍 09:30 수업 찾는 중...');
         
         try {
             await page.waitForSelector('table', { timeout: 5000 }).catch(() => {
@@ -308,25 +309,25 @@ class PilatesBooking {
             
             await this.takeScreenshot(page, '04-time-table');
             
-            // 10:30 수업 검색 및 예약
+            // 09:30 수업 검색 및 예약
             const result = await page.evaluate(() => {
-                console.log('=== 10:30 수업 검색 시작 ===');
+                console.log('=== 09:30 수업 검색 시작 ===');
                 
                 // 모든 테이블 행을 검색
                 const allRows = document.querySelectorAll('tr');
                 console.log(`전체 행 수: ${allRows.length}`);
                 
-                // 10:30을 포함하는 행 찾기
+                // 09:30을 포함하는 행 찾기 (10:30 제외)
                 for (let i = 0; i < allRows.length; i++) {
                     const row = allRows[i];
                     const rowText = row.textContent || '';
                     
-                    // 10:30이 포함되어 있는지 확인 (09:30 제외)
-                    if ((rowText.includes('10:30') || rowText.includes('10시30분')) && 
-                        !rowText.includes('09:30') && !rowText.includes('09시30분')) {
+                    // 09:30이 포함되어 있는지 확인 (10:30 제외)
+                    if ((rowText.includes('09:30') || rowText.includes('09시30분') || rowText.includes('9:30')) && 
+                        !rowText.includes('10:30') && !rowText.includes('10시30분')) {
                         
                         const cells = row.querySelectorAll('td');
-                        console.log(`10:30 포함 행 발견 (행 ${i}), 셀 수: ${cells.length}`);
+                        console.log(`09:30 포함 행 발견 (행 ${i}), 셀 수: ${cells.length}`);
                         
                         // 셀이 3개 이상인 경우만
                         if (cells.length >= 3) {
@@ -335,11 +336,12 @@ class PilatesBooking {
                                 const cellText = cells[j].textContent.trim();
                                 console.log(`  셀 ${j}: ${cellText.substring(0, 30)}`);
                                 
-                                // 시간 셀 확인
-                                if (cellText === '오전 10:30' || 
-                                    (cellText.includes('10:30') && !cellText.includes('09:30'))) {
+                                // 시간 셀 확인 (다양한 형식 지원)
+                                if (cellText === '오전 09:30' || cellText === '오전 9:30' ||
+                                    cellText.includes('09:30') || cellText.includes('9:30') ||
+                                    cellText.includes('09시30분') || cellText.includes('9시30분')) {
                                     
-                                    console.log(`✅ 10:30 시간 확인! 셀 인덱스: ${j}`);
+                                    console.log(`✅ 09:30 시간 확인! 셀 인덱스: ${j}`);
                                     
                                     // 예약 버튼 찾기 (보통 마지막 셀)
                                     let actionCell = cells[cells.length - 1];
@@ -361,23 +363,23 @@ class PilatesBooking {
                                     
                                     if (actionText.includes('예약하기')) {
                                         if (link) {
-                                            console.log('🎯 10:30 예약하기 링크 클릭!');
+                                            console.log('🎯 09:30 예약하기 링크 클릭!');
                                             link.click();
                                             return {
                                                 found: true,
                                                 booked: true,
-                                                message: '10:30 수업 예약 클릭',
+                                                message: '09:30 수업 예약 클릭',
                                                 needSubmit: true
                                             };
                                         }
                                     } else if (actionText.includes('대기')) {
                                         if (link) {
-                                            console.log('⏳ 10:30 대기예약 링크 클릭');
+                                            console.log('⏳ 09:30 대기예약 링크 클릭');
                                             link.click();
                                             return {
                                                 found: true,
                                                 booked: true,
-                                                message: '10:30 수업 대기예약',
+                                                message: '09:30 수업 대기예약',
                                                 isWaitingOnly: true,
                                                 needSubmit: true
                                             };
@@ -386,11 +388,11 @@ class PilatesBooking {
                                         return {
                                             found: true,
                                             booked: false,
-                                            message: '10:30 수업은 이미 예약됨'
+                                            message: '09:30 수업은 이미 예약됨'
                                         };
                                     }
                                     
-                                    break; // 10:30 찾았으므로 종료
+                                    break; // 09:30 찾았으므로 종료
                                 }
                             }
                         }
@@ -406,28 +408,29 @@ class PilatesBooking {
                     if (parentRow) {
                         const rowText = parentRow.textContent || '';
                         
-                        if ((rowText.includes('10:30') || rowText.includes('10시30분')) && 
-                            !rowText.includes('09:30') && !rowText.includes('09시30분')) {
+                        // 09:30 포함 여부 확인 (다양한 형식 지원)
+                        if ((rowText.includes('09:30') || rowText.includes('09시30분') || rowText.includes('9:30') || rowText.includes('9시30분')) && 
+                            !rowText.includes('10:30') && !rowText.includes('10시30분')) {
                             
                             const linkText = link.textContent.trim();
-                            console.log(`10:30 행의 링크 발견: ${linkText}`);
+                            console.log(`09:30 행의 링크 발견: ${linkText}`);
                             
                             if (linkText === '예약하기') {
-                                console.log('🎯 10:30 예약하기 링크 직접 클릭!');
+                                console.log('🎯 09:30 예약하기 링크 직접 클릭!');
                                 link.click();
                                 return {
                                     found: true,
                                     booked: true,
-                                    message: '10:30 수업 예약 (직접 링크)',
+                                    message: '09:30 수업 예약 (직접 링크)',
                                     needSubmit: true
                                 };
                             } else if (linkText.includes('대기')) {
-                                console.log('⏳ 10:30 대기예약 링크 직접 클릭');
+                                console.log('⏳ 09:30 대기예약 링크 직접 클릭');
                                 link.click();
                                 return {
                                     found: true,
                                     booked: true,
-                                    message: '10:30 수업 대기예약 (직접 링크)',
+                                    message: '09:30 수업 대기예약 (직접 링크)',
                                     isWaitingOnly: true,
                                     needSubmit: true
                                 };
@@ -439,7 +442,7 @@ class PilatesBooking {
                 return {
                     found: false,
                     booked: false,
-                    message: '10:30 수업을 찾을 수 없음'
+                    message: '09:30 수업을 찾을 수 없음'
                 };
             });
             
@@ -563,7 +566,7 @@ class PilatesBooking {
             await page.waitForTimeout(3000);
             await this.takeScreenshot(page, '08-booking-list-page');
             
-            // 예약 내역 확인 (수정됨: KST 날짜 계산 로직 개선)
+            // 예약 내역 확인 (수정됨: 09:30 시간 확인으로 변경)
             const targetInfo = this.getTargetDate();
             const bookingVerified = await page.evaluate((targetInfo) => {
                 const bodyText = document.body.innerText || document.body.textContent || '';
@@ -584,24 +587,25 @@ class PilatesBooking {
                     `2025/${month}/${day}`
                 ];
                 
-                // 10:30 수업 확인
-                if (bodyText.includes('10:30') || bodyText.includes('10시30분')) {
+                // 09:30 수업 확인 (다양한 형식 지원)
+                if (bodyText.includes('09:30') || bodyText.includes('09시30분') || 
+                    bodyText.includes('9:30') || bodyText.includes('9시30분')) {
                     for (let format of dateFormats) {
                         if (bodyText.includes(format)) {
-                            console.log(`✅ 예약 확인: ${format} 10:30`);
+                            console.log(`✅ 예약 확인: ${format} 09:30`);
                             return { verified: true, format: format };
                         }
                     }
                     
-                    if (bodyText.includes('10:30')) {
-                        console.log('✅ 10:30 수업 예약 확인');
-                        return { verified: true, format: '10:30 found' };
+                    if (bodyText.includes('09:30') || bodyText.includes('9:30')) {
+                        console.log('✅ 09:30 수업 예약 확인');
+                        return { verified: true, format: '09:30 found' };
                     }
                 }
                 
-                // 대기예약 확인
-                if (bodyText.includes('*') && bodyText.includes('10:30')) {
-                    console.log('✅ 10:30 대기예약 확인 (*)');
+                // 대기예약 확인 (09:30)
+                if (bodyText.includes('*') && (bodyText.includes('09:30') || bodyText.includes('9:30'))) {
+                    console.log('✅ 09:30 대기예약 확인 (*)');
                     return { verified: true, isWaiting: true };
                 }
                 
@@ -742,8 +746,8 @@ class PilatesBooking {
                 // 2. 예약 페이지로 이동
                 const dateInfo = await this.navigateToBookingPage(page);
                 
-                // 3. 10:30 수업 찾고 예약
-                const result = await this.find1030ClassAndBook(page);
+                // 3. 09:30 수업 찾고 예약 (함수명 변경)
+                const result = await this.find0930ClassAndBook(page);
                 
                 // 4. 결과 처리
                 if (result.booked) {
@@ -761,11 +765,11 @@ class PilatesBooking {
                     
                     success = true;
                     
-                    // 결과 저장
+                    // 결과 저장 (09:30으로 변경)
                     const resultInfo = {
                         timestamp: this.getKSTDate().toISOString(),
                         date: `${dateInfo.year}-${dateInfo.month}-${dateInfo.day}`,
-                        class: '10:30',
+                        class: '09:30',
                         status: this.testMode ? 'TEST' : (result.isWaitingOnly ? 'WAITING' : 'SUCCESS'),
                         message: result.message,
                         verified: !this.testMode ? verified : null,
@@ -793,7 +797,7 @@ class PilatesBooking {
                         const resultInfo = {
                             timestamp: this.getKSTDate().toISOString(),
                             date: `${dateInfo.year}-${dateInfo.month}-${dateInfo.day}`,
-                            class: '10:30',
+                            class: '09:30',
                             status: 'ALREADY_BOOKED',
                             message: '이미 예약되어 있음',
                             verified: true,
@@ -809,7 +813,7 @@ class PilatesBooking {
                         break;
                     }
                 } else {
-                    throw new Error('10:30 수업을 찾을 수 없음');
+                    throw new Error('09:30 수업을 찾을 수 없음');
                 }
                 
             } catch (error) {
@@ -835,7 +839,7 @@ class PilatesBooking {
             const resultInfo = {
                 timestamp: this.getKSTDate().toISOString(),
                 date: `${targetInfo.year}-${targetInfo.month}-${targetInfo.day}`,
-                class: '10:30',
+                class: '09:30',
                 status: 'FAILED',
                 message: '예약 실패 - 동시신청 충돌 또는 시스템 오류',
                 kstTime: this.getKSTDate().toLocaleString('ko-KR'),
