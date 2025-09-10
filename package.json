@@ -1,7 +1,7 @@
 {
   "name": "pilates-auto-booking",
-  "version": "3.0.0",
-  "description": "에이디기구필라테스 자동 예약 시스템 (개선된 버전)",
+  "version": "3.1.0",
+  "description": "에이디기구필라테스 자동 예약 시스템 (중복 예약 방지 개선 버전)",
   "main": "booking-script.js",
   "scripts": {
     "test": "node test-script.js",
@@ -21,7 +21,8 @@
     "pilates",
     "booking",
     "automation",
-    "puppeteer"
+    "puppeteer",
+    "duplicate-prevention"
   ],
   "author": "",
   "license": "MIT"
