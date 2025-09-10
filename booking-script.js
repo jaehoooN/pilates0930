@@ -249,16 +249,16 @@ class PilatesBooking {
         if (currentUrl.includes('res_postform.php')) {
             await this.log('📍 이미 예약 페이지에 있음');
             
-            // 해당 날짜 클릭
+            // 해당 날짜 클릭 - 더 정확한 날짜 선택
             const dateClicked = await page.evaluate((targetDay) => {
                 const cells = document.querySelectorAll('td');
                 
                 for (let cell of cells) {
                     const text = cell.textContent.trim();
                     
-                    // 정확한 날짜 매칭
-                    if (text === String(targetDay) || 
-                        (text.startsWith(String(targetDay)) && !text.includes('X'))) {
+                    // 정확한 날짜 매칭 - 숫자만 있거나 숫자로 시작하는 경우
+                    const regex = new RegExp(`^${targetDay}(\\s|$|[^0-9])`);
+                    if (regex.test(text) && !text.includes('X')) {
                         
                         // 클릭 가능한 요소 찾기
                         const link = cell.querySelector('a');
@@ -301,7 +301,7 @@ class PilatesBooking {
         return { year, month, day };
     }
 
-    // 09:30 수업 찾기 및 예약하기 - 다이얼로그 처리 개선
+    // 09:30 수업 찾기 및 예약하기 - 중복 예약 방지 및 개선된 버전
     async find0930ClassAndBook(page) {
         await this.log('🔍 09:30 수업 찾는 중...');
         
@@ -312,20 +312,29 @@ class PilatesBooking {
             
             await this.takeScreenshot(page, '04-time-table');
             
-            // 대기예약 confirm 핸들러 설정 (한 번만 처리하도록)
+            // 대기예약 confirm 핸들러 설정 (개선된 버전)
             let waitingDialogHandled = false;
             const dialogHandler = async (dialog) => {
                 const message = dialog.message();
                 await this.log(`📢 알림: ${message}`);
                 
-                // 대기예약 확인 다이얼로그
-                if (message.includes('정원이 초과') && message.includes('대기예약')) {
+                // 대기예약 확인 다이얼로그 - 정확한 메시지 매칭
+                if (message.includes('정원이 초과') && message.includes('대기예약을 하시겠습니까')) {
                     if (!waitingDialogHandled) {
                         waitingDialogHandled = true;
                         this.isWaitingReservation = true;
+                        this.bookingSuccess = true; // 대기예약도 성공으로 간주
                         await dialog.accept();
                         await this.log('✅ 대기예약 확인 완료');
                     }
+                    return;
+                }
+                
+                // 요일별 예약횟수 완료 알림 - 새로 추가
+                if (message.includes('요일별 예약횟수가 완료')) {
+                    this.bookingSuccess = true;
+                    await dialog.accept();
+                    await this.log('🎉 요일별 예약횟수 완료 - 예약 성공!');
                     return;
                 }
                 
@@ -361,6 +370,13 @@ class PilatesBooking {
                     return;
                 }
                 
+                // 타임 선택 오류 - 새로 추가
+                if (message.includes('선택된 타임이 없습니다') || message.includes('예약선택을 하십시오')) {
+                    await dialog.accept();
+                    await this.log('⚠️ 타임 선택 오류 - 잘못된 시간대 선택됨');
+                    throw new Error('타임 선택 오류');
+                }
+                
                 // 로그인 오류
                 if (message.includes('등록되어 있지 않습니다')) {
                     await dialog.accept();
@@ -374,7 +390,7 @@ class PilatesBooking {
             // 다이얼로그 핸들러 등록
             page.on('dialog', dialogHandler);
             
-            // 09:30 수업 검색 및 예약
+            // 09:30 수업 검색 및 예약 - 중복 예약 방지 개선된 로직
             const result = await page.evaluate(() => {
                 console.log('=== 09:30 수업 검색 시작 ===');
                 
@@ -382,14 +398,75 @@ class PilatesBooking {
                 const allRows = document.querySelectorAll('tr');
                 console.log(`전체 행 수: ${allRows.length}`);
                 
-                // 09:30을 포함하는 행 찾기 (10:30 제외)
+                // 첫 번째 패스: 이미 예약된 09:30 수업이 있는지 확인
+                let hasExisting0930Booking = false;
+                let existingBookingType = '';
+                
                 for (let i = 0; i < allRows.length; i++) {
                     const row = allRows[i];
                     const rowText = row.textContent || '';
                     
-                    // 09:30이 포함되어 있는지 확인 (10:30 제외)
+                    // 09:30이 포함되어 있는지 확인 (오전 수업만)
                     if ((rowText.includes('09:30') || rowText.includes('09시30분') || rowText.includes('9:30')) && 
-                        !rowText.includes('10:30') && !rowText.includes('10시30분')) {
+                        !rowText.includes('오후') && !rowText.includes('PM')) {
+                        
+                        const cells = row.querySelectorAll('td');
+                        if (cells.length >= 3) {
+                            // 시간 셀 찾기
+                            for (let j = 0; j < cells.length; j++) {
+                                const cellText = cells[j].textContent.trim();
+                                
+                                // 시간 셀 확인 (오전 09:30만)
+                                if (cellText === '오전 09:30' || cellText === '오전 9:30' ||
+                                    cellText.includes('09:30') || cellText.includes('9:30') ||
+                                    cellText.includes('09시30분') || cellText.includes('9시30분')) {
+                                    
+                                    // 예약 상태 셀 찾기
+                                    let actionCell = cells[cells.length - 1];
+                                    if (j < cells.length - 1) {
+                                        const nextCell = cells[j + 1];
+                                        if (nextCell.textContent.includes('예약') || 
+                                            nextCell.textContent.includes('대기') ||
+                                            nextCell.textContent.includes('완료')) {
+                                            actionCell = nextCell;
+                                        }
+                                    }
+                                    
+                                    const actionText = actionCell.textContent.trim();
+                                    console.log(`09:30 수업 상태 확인: ${actionText} (행 ${i})`);
+                                    
+                                    // 이미 예약/대기예약된 수업이 있는지 확인
+                                    if (actionText.includes('예약완료') || actionText.includes('대기완료') || 
+                                        actionText.includes('삭제') || actionText.includes('취소')) {
+                                        hasExisting0930Booking = true;
+                                        existingBookingType = actionText.includes('대기완료') ? '대기예약' : '예약';
+                                        console.log(`✅ 이미 09:30 ${existingBookingType} 완료됨 (행 ${i})`);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // 이미 예약된 09:30 수업이 있으면 추가 예약 방지
+                if (hasExisting0930Booking) {
+                    return {
+                        found: true,
+                        booked: false,
+                        alreadyBooked: true,
+                        message: `09:30 수업 ${existingBookingType}이 이미 완료됨 - 중복 예약 방지`
+                    };
+                }
+                
+                // 두 번째 패스: 예약 가능한 09:30 수업 찾기
+                for (let i = 0; i < allRows.length; i++) {
+                    const row = allRows[i];
+                    const rowText = row.textContent || '';
+                    
+                    // 09:30이 포함되어 있는지 확인 (오전 수업만)
+                    if ((rowText.includes('09:30') || rowText.includes('09시30분') || rowText.includes('9:30')) && 
+                        !rowText.includes('오후') && !rowText.includes('PM')) {
                         
                         const cells = row.querySelectorAll('td');
                         console.log(`09:30 포함 행 발견 (행 ${i}), 셀 수: ${cells.length}`);
@@ -401,7 +478,7 @@ class PilatesBooking {
                                 const cellText = cells[j].textContent.trim();
                                 console.log(`  셀 ${j}: ${cellText.substring(0, 30)}`);
                                 
-                                // 시간 셀 확인 (다양한 형식 지원)
+                                // 시간 셀 확인 (오전 09:30만)
                                 if (cellText === '오전 09:30' || cellText === '오전 9:30' ||
                                     cellText.includes('09:30') || cellText.includes('9:30') ||
                                     cellText.includes('09시30분') || cellText.includes('9시30분')) {
@@ -415,7 +492,8 @@ class PilatesBooking {
                                     if (j < cells.length - 1) {
                                         const nextCell = cells[j + 1];
                                         if (nextCell.textContent.includes('예약') || 
-                                            nextCell.textContent.includes('대기')) {
+                                            nextCell.textContent.includes('대기') ||
+                                            nextCell.textContent.includes('완료')) {
                                             actionCell = nextCell;
                                         }
                                     }
@@ -423,7 +501,7 @@ class PilatesBooking {
                                     const actionText = actionCell.textContent.trim();
                                     console.log(`예약 셀 내용: ${actionText}`);
                                     
-                                    // 예약 링크 찾기
+                                    // 예약 상태별 처리
                                     const link = actionCell.querySelector('a');
                                     
                                     if (actionText.includes('예약하기')) {
@@ -437,7 +515,7 @@ class PilatesBooking {
                                                 needSubmit: true
                                             };
                                         }
-                                    } else if (actionText.includes('대기')) {
+                                    } else if (actionText.includes('대기예약')) {
                                         if (link) {
                                             console.log('⏳ 09:30 대기예약 링크 클릭');
                                             link.click();
@@ -446,59 +524,27 @@ class PilatesBooking {
                                                 booked: true,
                                                 message: '09:30 수업 대기예약',
                                                 isWaitingOnly: true,
-                                                needSubmit: true
+                                                needSubmit: false // 대기예약은 confirm만으로 완료
                                             };
                                         }
-                                    } else if (actionText.includes('삭제') || actionText.includes('취소')) {
+                                    } else if (actionText.includes('대기완료')) {
                                         return {
                                             found: true,
                                             booked: false,
+                                            alreadyBooked: true,
+                                            message: '09:30 수업 대기예약이 이미 완료됨'
+                                        };
+                                    } else if (actionText.includes('예약완료') || actionText.includes('삭제') || actionText.includes('취소')) {
+                                        return {
+                                            found: true,
+                                            booked: false,
+                                            alreadyBooked: true,
                                             message: '09:30 수업은 이미 예약됨'
                                         };
                                     }
                                     
                                     break; // 09:30 찾았으므로 종료
                                 }
-                            }
-                        }
-                    }
-                }
-                
-                // 대체 방법: 링크 기반 검색
-                console.log('=== 대체 방법: 링크 기반 검색 ===');
-                
-                const allLinks = document.querySelectorAll('a');
-                for (let link of allLinks) {
-                    const parentRow = link.closest('tr');
-                    if (parentRow) {
-                        const rowText = parentRow.textContent || '';
-                        
-                        // 09:30 포함 여부 확인 (다양한 형식 지원)
-                        if ((rowText.includes('09:30') || rowText.includes('09시30분') || rowText.includes('9:30') || rowText.includes('9시30분')) && 
-                            !rowText.includes('10:30') && !rowText.includes('10시30분')) {
-                            
-                            const linkText = link.textContent.trim();
-                            console.log(`09:30 행의 링크 발견: ${linkText}`);
-                            
-                            if (linkText === '예약하기') {
-                                console.log('🎯 09:30 예약하기 링크 직접 클릭!');
-                                link.click();
-                                return {
-                                    found: true,
-                                    booked: true,
-                                    message: '09:30 수업 예약 (직접 링크)',
-                                    needSubmit: true
-                                };
-                            } else if (linkText.includes('대기')) {
-                                console.log('⏳ 09:30 대기예약 링크 직접 클릭');
-                                link.click();
-                                return {
-                                    found: true,
-                                    booked: true,
-                                    message: '09:30 수업 대기예약 (직접 링크)',
-                                    isWaitingOnly: true,
-                                    needSubmit: true
-                                };
                             }
                         }
                     }
@@ -513,46 +559,29 @@ class PilatesBooking {
             
             await this.log(`🔍 검색 결과: ${result.message}`);
             
+            // 이미 예약된 경우 처리
+            if (result.alreadyBooked) {
+                await this.log('✅ 이미 예약/대기예약 완료된 상태 - 중복 예약 방지');
+                this.bookingSuccess = true;
+                if (result.message.includes('대기')) {
+                    this.isWaitingReservation = true;
+                }
+                // 다이얼로그 핸들러 제거
+                page.off('dialog', dialogHandler);
+                return result;
+            }
+            
             // 예약 후 처리
             if (result.booked) {
                 await this.log('⏳ 예약 처리 대기 중...');
                 
                 // 대기예약인 경우 confirm 처리 대기
                 if (result.isWaitingOnly) {
-                    await page.waitForTimeout(2000); // confirm 처리 대기
-                }
-                
-                // Submit 처리 - 날짜 선택 문제 해결
-                if (result.needSubmit && !this.testMode) {
+                    await page.waitForTimeout(3000); // confirm 처리 대기
+                } else if (result.needSubmit && !this.testMode) {
+                    // 일반 예약의 경우 Submit 처리
                     await this.log('📝 Submit 처리 준비...');
-                    
-                    // 대기예약 후 페이지 재로드 필요할 수 있음
-                    if (this.isWaitingReservation) {
-                        await page.waitForTimeout(1000);
-                        
-                        // 날짜가 선택되어 있는지 확인하고 다시 선택
-                        const targetInfo = this.getTargetDate();
-                        await page.evaluate((day) => {
-                            // 날짜 다시 선택
-                            const cells = document.querySelectorAll('td');
-                            for (let cell of cells) {
-                                const text = cell.textContent.trim();
-                                if (text === String(day) || text.startsWith(String(day))) {
-                                    const link = cell.querySelector('a');
-                                    if (link) {
-                                        link.click();
-                                    } else {
-                                        cell.click();
-                                    }
-                                    break;
-                                }
-                            }
-                        }, targetInfo.day);
-                        
-                        await page.waitForTimeout(1000);
-                    }
-                    
-                    await this.log('📝 Submit 버튼 찾는 중...');
+                    await page.waitForTimeout(1000);
                     
                     const submitSuccess = await page.evaluate(() => {
                         // 모든 submit 관련 요소 찾기
@@ -628,7 +657,8 @@ class PilatesBooking {
                     '정상적으로 예약',
                     '대기예약 완료',
                     '대기 예약',
-                    '예약신청이 완료'
+                    '예약신청이 완료',
+                    '요일별 예약횟수가 완료' // 새로 추가
                 ];
                 
                 for (let pattern of successPatterns) {
@@ -711,23 +741,42 @@ class PilatesBooking {
                 return true;
             }
             
-            // 3. 캘린더 페이지에서도 확인
+            // 3. 캘린더 페이지에서도 확인 - 개선된 버전
             await this.log('📅 캘린더에서 확인 시도...');
             await page.goto(`${this.baseUrl}/yeapp/yeapp.php?tm=102`, {
                 waitUntil: 'networkidle2'
             });
             
             await page.waitForTimeout(2000);
+            await this.takeScreenshot(page, '08-calendar-check');
             
             const calendarVerified = await page.evaluate((targetDay) => {
-                const cells = document.querySelectorAll('td');
-                for (let cell of cells) {
-                    const cellText = cell.textContent || '';
-                    if (cellText.includes(String(targetDay)) && cellText.includes('*')) {
-                        console.log(`✅ 캘린더에서 ${targetDay}일 예약 확인 (*)`);
+                const bodyText = document.body.innerText || document.body.textContent || '';
+                console.log('캘린더 텍스트 샘플:', bodyText.substring(0, 500));
+                
+                // 더 정확한 패턴 매칭 - 개선된 버전
+                const patterns = [
+                    `${targetDay}\n*`,        // 줄바꿈 후 *
+                    `${targetDay} *`,         // 공백 후 *
+                    `${targetDay}*`,          // 바로 *
+                    `${targetDay}\t*`,        // 탭 후 *
+                    `${targetDay}\r\n*`,      // Windows 줄바꿈 후 *
+                ];
+                
+                for (let pattern of patterns) {
+                    if (bodyText.includes(pattern)) {
+                        console.log(`✅ 캘린더에서 ${targetDay}일 예약 확인 (패턴: ${pattern})`);
                         return true;
                     }
                 }
+                
+                // 정규식을 사용한 더 유연한 매칭
+                const regex = new RegExp(`${targetDay}[\\s\\n\\t\\r]*\\*`);
+                if (regex.test(bodyText)) {
+                    console.log(`✅ 캘린더에서 ${targetDay}일 예약 확인 (정규식)`);
+                    return true;
+                }
+                
                 return false;
             }, targetInfo.day);
             
@@ -737,18 +786,18 @@ class PilatesBooking {
                 return true;
             }
             
-            // 동시신청 오류인 경우 실패로 처리
-            if (!this.bookingSuccess) {
-                await this.log('❌ 예약 확인 실패 - 동시신청 오류 또는 예약 실패');
-                return false;
+            // 대기예약이나 예약 성공 플래그가 있으면 성공으로 간주
+            if (this.bookingSuccess) {
+                await this.log('✅ 예약 프로세스 완료 - 대기예약 또는 예약 성공');
+                return true;
             }
             
-            await this.log('⚠️ 명시적 예약 확인 실패 - 예약 프로세스는 완료됨');
-            return true;
+            await this.log('⚠️ 명시적 예약 확인 실패');
+            return false;
             
         } catch (error) {
             await this.log(`⚠️ 예약 확인 과정 에러: ${error.message}`);
-            return !this.bookingSuccess ? false : true;
+            return this.bookingSuccess; // 예약 성공 플래그로 판단
         }
     }
 
@@ -802,17 +851,12 @@ class PilatesBooking {
                 const result = await this.find0930ClassAndBook(page);
                 
                 // 4. 결과 처리
-                if (result.booked) {
+                if (result.booked || result.alreadyBooked) {
                     await this.log('✅ 예약 프로세스 완료');
                     
                     let verified = false;
                     if (!this.testMode) {
                         verified = await this.verifyBooking(page);
-                    }
-                    
-                    // 동시신청 오류가 발생했다면 재시도
-                    if (!this.bookingSuccess && !verified) {
-                        throw new Error('예약 확인 실패 - 동시신청 오류 가능성');
                     }
                     
                     success = true;
@@ -822,10 +866,13 @@ class PilatesBooking {
                         timestamp: this.getKSTDate().toISOString(),
                         date: `${dateInfo.year}-${dateInfo.month}-${dateInfo.day}`,
                         class: '09:30',
-                        status: this.testMode ? 'TEST' : (this.isWaitingReservation ? 'WAITING' : 'SUCCESS'),
+                        status: this.testMode ? 'TEST' : 
+                               result.alreadyBooked ? (this.isWaitingReservation ? 'ALREADY_WAITING' : 'ALREADY_BOOKED') :
+                               (this.isWaitingReservation ? 'WAITING' : 'SUCCESS'),
                         message: result.message,
                         verified: !this.testMode ? verified : null,
-                        note: verified ? '예약 확인 완료' : '예약 프로세스 완료',
+                        note: result.alreadyBooked ? '이미 예약/대기예약 완료 - 중복 방지' : 
+                              verified ? '예약 확인 완료' : '예약 프로세스 완료',
                         kstTime: this.getKSTDate().toLocaleString('ko-KR'),
                         bookingSuccess: this.bookingSuccess,
                         isWaitingReservation: this.isWaitingReservation
@@ -842,29 +889,13 @@ class PilatesBooking {
                     if (this.isWaitingReservation) {
                         await this.log('⚠️ 대기예약으로 등록되었습니다.');
                     }
-                } else if (result.found) {
-                    if (result.message.includes('이미 예약')) {
-                        await this.log('✅ 이미 예약되어 있음 - 정상 상태');
-                        success = true;
-                        
-                        const resultInfo = {
-                            timestamp: this.getKSTDate().toISOString(),
-                            date: `${dateInfo.year}-${dateInfo.month}-${dateInfo.day}`,
-                            class: '09:30',
-                            status: 'ALREADY_BOOKED',
-                            message: '이미 예약되어 있음',
-                            verified: true,
-                            kstTime: this.getKSTDate().toLocaleString('ko-KR')
-                        };
-                        
-                        const resultFile = this.testMode ? 'test-result.json' : 'booking-result.json';
-                        await fs.writeFile(
-                            resultFile,
-                            JSON.stringify(resultInfo, null, 2)
-                        );
-                    } else {
-                        break;
+                    
+                    if (result.alreadyBooked) {
+                        await this.log('📋 중복 예약 방지 - 이미 완료된 예약 확인');
                     }
+                    
+                } else if (result.found) {
+                    throw new Error('예약 처리 실패');
                 } else {
                     throw new Error('09:30 수업을 찾을 수 없음');
                 }
@@ -874,8 +905,10 @@ class PilatesBooking {
                 await this.log(`❌ 시도 ${retryCount}/${this.maxRetries} 실패: ${error.message}`);
                 
                 if (retryCount < this.maxRetries) {
-                    // 동시신청 오류시 더 긴 대기 (수정됨)
-                    const delay = error.message.includes('동시신청') ? 3000 : this.retryDelay;
+                    // 동시신청 오류시 더 긴 대기, 타임 선택 오류시 짧은 대기
+                    const delay = error.message.includes('동시신청') ? 3000 :
+                                 error.message.includes('타임 선택') ? 1000 :
+                                 this.retryDelay;
                     await this.log(`⏳ ${delay/1000}초 후 재시도...`);
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
