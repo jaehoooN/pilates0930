@@ -3,7 +3,7 @@ name: 🏋️ 필라테스 자동 예약 v3.1
 on:
   schedule:
     # 한국시간 매일 00:00 (UTC 15:00)
-    # 정각에 실행하되, 주말은 스크립트에서 자동 스킵
+    # 정확에 실행하되, 주말은 스크립트에서 자동 스킵
     - cron: '0 15 * * *'  # 정확히 자정에 실행하도록 수정
   
   workflow_dispatch:
@@ -66,4 +66,130 @@ jobs:
         esac
         
         echo "🎯 예약 대상 날짜: $target_date ($day_name)"
-        echo "📊
+        echo "📊 예약 대상 요일 숫자: $target_day (1=월, 7=일)"
+        
+        # 주말 체크 (토요일=6, 일요일=7)
+        force_weekend="${{ github.event.inputs.force_weekend }}"
+        if [[ "$target_day" == "6" || "$target_day" == "7" ]]; then
+          if [[ "$force_weekend" == "true" ]]; then
+            echo "⚠️ 주말이지만 강제 실행 옵션 활성화"
+            echo "should_run=true" >> $GITHUB_OUTPUT
+          else
+            echo "🚫 주말($day_name)이므로 예약하지 않습니다"
+            echo "should_run=false" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "✅ 평일($day_name) 확인 - 예약 진행"
+          echo "should_run=true" >> $GITHUB_OUTPUT
+        fi
+        
+        echo "target_date=$target_date" >> $GITHUB_OUTPUT
+        echo "day_name=$day_name" >> $GITHUB_OUTPUT
+
+  pilates-booking:
+    needs: check-weekday
+    runs-on: ubuntu-latest
+    if: needs.check-weekday.outputs.should_run == 'true'
+    
+    steps:
+    - name: 📁 체크아웃
+      uses: actions/checkout@v4
+    
+    - name: 🔧 Node.js 설정
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: 📦 의존성 설치
+      run: npm ci
+    
+    - name: 🔍 환경 확인
+      run: |
+        echo "📊 실행 환경:"
+        echo "- Node.js: $(node --version)"
+        echo "- npm: $(npm --version)"
+        echo "- 타임존: $(date)"
+        echo "- KST: $(TZ='Asia/Seoul' date)"
+        echo "- 예약 날짜: ${{ needs.check-weekday.outputs.target_date }}"
+        echo "- 요일: ${{ needs.check-weekday.outputs.day_name }}"
+        echo "- 테스트 모드: ${{ github.event.inputs.test_mode }}"
+    
+    - name: 🏋️ 필라테스 예약 실행
+      env:
+        PILATES_USERNAME: ${{ secrets.PILATES_USERNAME }}
+        PILATES_PASSWORD: ${{ secrets.PILATES_PASSWORD }}
+        TEST_MODE: ${{ github.event.inputs.test_mode }}
+        GITHUB_ACTIONS: true
+        CI: true
+      run: |
+        if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
+          echo "⚠️ 테스트 모드로 실행 중..."
+          npm run book:test
+        else
+          echo "🎯 실제 예약 모드로 실행 중..."
+          npm run book
+        fi
+    
+    - name: 📋 결과 확인
+      if: always()
+      run: |
+        echo "📊 예약 결과:"
+        if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
+          if [ -f "test-result.json" ]; then
+            echo "✅ 테스트 결과 파일 생성됨"
+            cat test-result.json
+          else
+            echo "❌ 테스트 결과 파일 없음"
+          fi
+        else
+          if [ -f "booking-result.json" ]; then
+            echo "✅ 예약 결과 파일 생성됨"
+            cat booking-result.json
+          else
+            echo "❌ 예약 결과 파일 없음"
+          fi
+        fi
+        
+        echo ""
+        echo "📁 로그 파일:"
+        if [ -d "logs" ]; then
+          ls -la logs/
+          if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
+            if [ -f "logs/test.log" ]; then
+              echo "=== 테스트 로그 ==="
+              tail -20 logs/test.log
+            fi
+          else
+            if [ -f "logs/booking.log" ]; then
+              echo "=== 예약 로그 ==="
+              tail -20 logs/booking.log
+            fi
+          fi
+        fi
+    
+    - name: 📸 스크린샷 업로드
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: booking-screenshots-${{ github.run_number }}
+        path: |
+          screenshots/
+          logs/
+          booking-result.json
+          test-result.json
+        retention-days: 7
+        if-no-files-found: ignore
+
+  weekend-skip:
+    needs: check-weekday
+    runs-on: ubuntu-latest
+    if: needs.check-weekday.outputs.should_run == 'false'
+    
+    steps:
+    - name: 🚫 주말 스킵 알림
+      run: |
+        echo "📅 예약 대상 날짜: ${{ needs.check-weekday.outputs.target_date }}"
+        echo "📆 요일: ${{ needs.check-weekday.outputs.day_name }}"
+        echo "🚫 주말이므로 예약을 건너뜁니다."
+        echo "💡 주말에도 실행하려면 'force_weekend' 옵션을 true로 설정하세요."
