@@ -1,0 +1,11 @@
+# 필수: 개인정보 보호
+.env
+
+# 필수: 용량 절약
+node_modules/
+
+# 선택: 실행 결과 파일들 (개인 취향)
+screenshots/
+logs/
+booking-result.json
+test-result.json
