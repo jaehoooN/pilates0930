@@ -2,9 +2,9 @@ name: 🏋️ 필라테스 자동 예약 v3.1
 
 on:
   schedule:
-    # 한국시간 매일 00:00 (UTC 15:00)
-    # 정확에 실행하되, 주말은 스크립트에서 자동 스킵
-    - cron: '0 15 * * *'  # 정확히 자정에 실행하도록 수정
+    # 한국시간 23:45 (UTC 14:45) - GitHub Actions 지연을 고려하여 15분 앞당김
+    # 실제 예약 실행은 자정(00:00~00:05) 사이에 이루어짐
+    - cron: '45 14 * * *'  # UTC 14:45 = KST 23:45
   
   workflow_dispatch:
     inputs:
@@ -86,10 +86,67 @@ jobs:
         echo "target_date=$target_date" >> $GITHUB_OUTPUT
         echo "day_name=$day_name" >> $GITHUB_OUTPUT
 
-  pilates-booking:
+  wait-for-midnight:
     needs: check-weekday
     runs-on: ubuntu-latest
     if: needs.check-weekday.outputs.should_run == 'true'
+    outputs:
+      ready_for_booking: ${{ steps.wait.outputs.ready }}
+    
+    steps:
+    - name: ⏰ 자정까지 대기
+      id: wait
+      run: |
+        echo "⏰ 자정 대기 로직 시작"
+        
+        # 현재 KST 시간 확인
+        current_kst=$(TZ='Asia/Seoul' date '+%H:%M:%S')
+        current_hour=$(TZ='Asia/Seoul' date '+%H')
+        current_minute=$(TZ='Asia/Seoul' date '+%M')
+        
+        echo "현재 KST 시간: $current_kst"
+        echo "현재 시간: ${current_hour}시 ${current_minute}분"
+        
+        # 23:45 ~ 00:05 사이에만 실행 허용
+        if [[ "$current_hour" == "23" && "$current_minute" -ge "45" ]]; then
+          # 23:45 이후라면 자정까지 대기
+          echo "🕚 23:45 이후 - 자정까지 대기 중..."
+          
+          while true; do
+            now_hour=$(TZ='Asia/Seoul' date '+%H')
+            now_minute=$(TZ='Asia/Seoul' date '+%M')
+            now_second=$(TZ='Asia/Seoul' date '+%S')
+            
+            if [[ "$now_hour" == "00" && "$now_minute" == "00" ]]; then
+              echo "🎯 자정 00:00 도달! 예약 시작"
+              break
+            elif [[ "$now_hour" == "00" && "$now_minute" -lt "05" ]]; then
+              echo "🎯 자정 ${now_minute}분 - 예약 시작 (5분 이내)"
+              break
+            fi
+            
+            # 30초마다 체크
+            sleep 30
+            echo "⏳ 대기 중... 현재: ${now_hour}:${now_minute}:${now_second}"
+          done
+          
+        elif [[ "$current_hour" == "00" && "$current_minute" -lt "05" ]]; then
+          # 이미 자정~00:05 사이라면 바로 실행
+          echo "🎯 현재 자정~00:05 사이 - 바로 예약 진행"
+        else
+          # 예상 밖의 시간대
+          echo "⚠️ 예상 밖의 실행 시간: ${current_hour}:${current_minute}"
+          echo "정상 실행 시간: 23:45~00:05"
+          echo "그래도 예약 진행..."
+        fi
+        
+        echo "ready=true" >> $GITHUB_OUTPUT
+        echo "✅ 자정 대기 완료 - 예약 준비됨"
+
+  pilates-booking:
+    needs: [check-weekday, wait-for-midnight]
+    runs-on: ubuntu-latest
+    if: needs.check-weekday.outputs.should_run == 'true' && needs.wait-for-midnight.outputs.ready_for_booking == 'true'
     
     steps:
     - name: 📁 체크아웃
