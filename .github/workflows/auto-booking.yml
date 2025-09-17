@@ -3,7 +3,7 @@ name: 🏋️ 필라테스 자동 예약 v3.1
 on:
   schedule:
     # 한국시간 23:45 (UTC 14:45) - GitHub Actions 지연을 고려하여 15분 앞당김
-    # 실제 예약 실행은 자정(00:00~00:05) 사이에 이루어짐
+    # 실제 예약 실행은 자정(00:00~00:15) 사이에 이루어짐
     - cron: '45 14 * * *'  # UTC 14:45 = KST 23:45
   
   workflow_dispatch:
@@ -33,7 +33,7 @@ jobs:
       target_date: ${{ steps.check.outputs.target_date }}
       day_name: ${{ steps.check.outputs.day_name }}
     steps:
-    - name: 📅 주말 체크 (KST 기준) - 수정됨
+    - name: 📅 주말 체크 (KST 기준)
       id: check
       run: |
         # 현재 UTC 시간을 KST로 변환하여 7일 후 계산
@@ -86,67 +86,11 @@ jobs:
         echo "target_date=$target_date" >> $GITHUB_OUTPUT
         echo "day_name=$day_name" >> $GITHUB_OUTPUT
 
-  wait-for-midnight:
+  pilates-booking:
     needs: check-weekday
     runs-on: ubuntu-latest
+    # 안전장치: check-weekday만 성공하면 실행 (wait job 의존성 제거)
     if: needs.check-weekday.outputs.should_run == 'true'
-    outputs:
-      ready_for_booking: ${{ steps.wait.outputs.ready }}
-    
-    steps:
-    - name: ⏰ 자정까지 대기
-      id: wait
-      run: |
-        echo "⏰ 자정 대기 로직 시작"
-        
-        # 현재 KST 시간 확인
-        current_kst=$(TZ='Asia/Seoul' date '+%H:%M:%S')
-        current_hour=$(TZ='Asia/Seoul' date '+%H')
-        current_minute=$(TZ='Asia/Seoul' date '+%M')
-        
-        echo "현재 KST 시간: $current_kst"
-        echo "현재 시간: ${current_hour}시 ${current_minute}분"
-        
-        # 23:45 ~ 00:05 사이에만 실행 허용
-        if [[ "$current_hour" == "23" && "$current_minute" -ge "45" ]]; then
-          # 23:45 이후라면 자정까지 대기
-          echo "🕚 23:45 이후 - 자정까지 대기 중..."
-          
-          while true; do
-            now_hour=$(TZ='Asia/Seoul' date '+%H')
-            now_minute=$(TZ='Asia/Seoul' date '+%M')
-            now_second=$(TZ='Asia/Seoul' date '+%S')
-            
-            if [[ "$now_hour" == "00" && "$now_minute" == "00" ]]; then
-              echo "🎯 자정 00:00 도달! 예약 시작"
-              break
-            elif [[ "$now_hour" == "00" && "$now_minute" -lt "05" ]]; then
-              echo "🎯 자정 ${now_minute}분 - 예약 시작 (5분 이내)"
-              break
-            fi
-            
-            # 30초마다 체크
-            sleep 30
-            echo "⏳ 대기 중... 현재: ${now_hour}:${now_minute}:${now_second}"
-          done
-          
-        elif [[ "$current_hour" == "00" && "$current_minute" -lt "05" ]]; then
-          # 이미 자정~00:05 사이라면 바로 실행
-          echo "🎯 현재 자정~00:05 사이 - 바로 예약 진행"
-        else
-          # 예상 밖의 시간대
-          echo "⚠️ 예상 밖의 실행 시간: ${current_hour}:${current_minute}"
-          echo "정상 실행 시간: 23:45~00:05"
-          echo "그래도 예약 진행..."
-        fi
-        
-        echo "ready=true" >> $GITHUB_OUTPUT
-        echo "✅ 자정 대기 완료 - 예약 준비됨"
-
-  pilates-booking:
-    needs: [check-weekday, wait-for-midnight]
-    runs-on: ubuntu-latest
-    if: needs.check-weekday.outputs.should_run == 'true' && needs.wait-for-midnight.outputs.ready_for_booking == 'true'
     
     steps:
     - name: 📁 체크아웃
@@ -160,6 +104,65 @@ jobs:
     - name: 📦 의존성 설치
       run: npm install
     
+    - name: ⏰ 스마트 타이밍 제어
+      id: timing
+      run: |
+        echo "⏰ 타이밍 제어 시작"
+        
+        # 현재 KST 시간 확인
+        current_hour=$(TZ='Asia/Seoul' date '+%H')
+        current_minute=$(TZ='Asia/Seoul' date '+%M')
+        current_time=$(TZ='Asia/Seoul' date '+%H:%M:%S')
+        
+        echo "📊 현재 KST 시간: $current_time"
+        echo "📊 시간: ${current_hour}시 ${current_minute}분"
+        
+        # 최적 실행 시간 체크 및 대기
+        if [[ "$current_hour" == "23" && "$current_minute" -ge "45" ]]; then
+          echo "🕚 23:45 이후 - 자정까지 대기"
+          
+          # 최대 20분 대기 (안전장치)
+          max_iterations=40  # 30초 * 40 = 20분
+          iteration=0
+          
+          while [[ $iteration -lt $max_iterations ]]; do
+            now_hour=$(TZ='Asia/Seoul' date '+%H')
+            now_minute=$(TZ='Asia/Seoul' date '+%M')
+            now_second=$(TZ='Asia/Seoul' date '+%S')
+            
+            echo "⏳ 현재: ${now_hour}:${now_minute}:${now_second} (${iteration}/${max_iterations})"
+            
+            # 00:00~00:15 사이면 즉시 시작
+            if [[ "$now_hour" == "00" && "$now_minute" -le "15" ]]; then
+              echo "🎯 최적 시간 도달! 예약 시작 (${now_hour}:${now_minute})"
+              break
+            fi
+            
+            # 30초 대기
+            sleep 30
+            iteration=$((iteration + 1))
+          done
+          
+          if [[ $iteration -ge $max_iterations ]]; then
+            echo "⚠️ 최대 대기 시간(20분) 초과 - 강제 시작"
+          fi
+          
+        elif [[ "$current_hour" == "00" && "$current_minute" -le "30" ]]; then
+          echo "🎯 이미 최적 시간대 (00:00~00:30) - 바로 시작"
+          
+        elif [[ "$current_hour" == "23" && "$current_minute" -ge "30" ]]; then
+          echo "🎯 적절한 시간대 (23:30~23:44) - 바로 시작"
+          
+        else
+          echo "⚠️ 예상 밖 시간대: ${current_hour}:${current_minute}"
+          echo "⚠️ 정상 실행 시간: 23:30~00:30"
+          echo "⚠️ 그래도 예약을 진행합니다 (fallback)"
+        fi
+        
+        final_time=$(TZ='Asia/Seoul' date '+%H:%M:%S')
+        echo "✅ 예약 시작 시간: $final_time"
+        echo "start_time=$final_time" >> $GITHUB_OUTPUT
+    
     - name: 🔍 환경 확인
       run: |
         echo "📊 실행 환경:"
@@ -167,6 +170,7 @@ jobs:
         echo "- npm: $(npm --version)"
         echo "- 타임존: $(date)"
         echo "- KST: $(TZ='Asia/Seoul' date)"
+        echo "- 예약 시작 시간: ${{ steps.timing.outputs.start_time }}"
         echo "- 예약 날짜: ${{ needs.check-weekday.outputs.target_date }}"
         echo "- 요일: ${{ needs.check-weekday.outputs.day_name }}"
         echo "- 테스트 모드: ${{ github.event.inputs.test_mode }}"
@@ -179,6 +183,8 @@ jobs:
         GITHUB_ACTIONS: true
         CI: true
       run: |
+        echo "🎯 예약 실행 시작 - KST: $(TZ='Asia/Seoul' date '+%H:%M:%S')"
+        
         if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
           echo "⚠️ 테스트 모드로 실행 중..."
           npm run book:test
@@ -186,11 +192,15 @@ jobs:
           echo "🎯 실제 예약 모드로 실행 중..."
           npm run book
         fi
+        
+        echo "✅ 예약 완료 - KST: $(TZ='Asia/Seoul' date '+%H:%M:%S')"
     
     - name: 📋 결과 확인
       if: always()
       run: |
         echo "📊 예약 결과:"
+        echo "📊 완료 시간: $(TZ='Asia/Seoul' date '+%H:%M:%S')"
+        
         if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
           if [ -f "test-result.json" ]; then
             echo "✅ 테스트 결과 파일 생성됨"
@@ -213,12 +223,12 @@ jobs:
           ls -la logs/
           if [[ "${{ github.event.inputs.test_mode }}" == "true" ]]; then
             if [ -f "logs/test.log" ]; then
-              echo "=== 테스트 로그 ==="
+              echo "=== 테스트 로그 (마지막 20줄) ==="
               tail -20 logs/test.log
             fi
           else
             if [ -f "logs/booking.log" ]; then
-              echo "=== 예약 로그 ==="
+              echo "=== 예약 로그 (마지막 20줄) ==="
               tail -20 logs/booking.log
             fi
           fi
