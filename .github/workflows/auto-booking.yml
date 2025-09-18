@@ -2,9 +2,8 @@ name: 🏋️ 필라테스 자동 예약 v3.1
 
 on:
   schedule:
-    # 한국시간 23:45 (UTC 14:45) - GitHub Actions 지연을 고려하여 15분 앞당김
-    # 실제 예약 실행은 자정(00:00~00:15) 사이에 이루어짐
-    - cron: '45 14 * * *'  # UTC 14:45 = KST 23:45
+    # 한국시간 00:01 (UTC 15:01) - 자정 피크 시간을 피하기 위해 1분 지연
+    - cron: '1 15 * * *'  # UTC 15:01 = KST 00:01
   
   workflow_dispatch:
     inputs:
@@ -89,7 +88,6 @@ jobs:
   pilates-booking:
     needs: check-weekday
     runs-on: ubuntu-latest
-    # 안전장치: check-weekday만 성공하면 실행 (wait job 의존성 제거)
     if: needs.check-weekday.outputs.should_run == 'true'
     
     steps:
@@ -104,59 +102,36 @@ jobs:
     - name: 📦 의존성 설치
       run: npm install
     
-    - name: ⏰ 스마트 타이밍 제어
+    - name: ⏰ 정밀 타이밍 제어 (00:01:10 목표)
       id: timing
       run: |
         echo "⏰ 타이밍 제어 시작"
         
         # 현재 KST 시간 확인
+        current_time=$(TZ='Asia/Seoul' date '+%H:%M:%S')
         current_hour=$(TZ='Asia/Seoul' date '+%H')
         current_minute=$(TZ='Asia/Seoul' date '+%M')
-        current_time=$(TZ='Asia/Seoul' date '+%H:%M:%S')
+        current_second=$(TZ='Asia/Seoul' date '+%S')
         
         echo "📊 현재 KST 시간: $current_time"
-        echo "📊 시간: ${current_hour}시 ${current_minute}분"
         
-        # 최적 실행 시간 체크 및 대기
-        if [[ "$current_hour" == "23" && "$current_minute" -ge "45" ]]; then
-          echo "🕚 23:45 이후 - 자정까지 대기"
-          
-          # 최대 20분 대기 (안전장치)
-          max_iterations=40  # 30초 * 40 = 20분
-          iteration=0
-          
-          while [[ $iteration -lt $max_iterations ]]; do
-            now_hour=$(TZ='Asia/Seoul' date '+%H')
-            now_minute=$(TZ='Asia/Seoul' date '+%M')
-            now_second=$(TZ='Asia/Seoul' date '+%S')
-            
-            echo "⏳ 현재: ${now_hour}:${now_minute}:${now_second} (${iteration}/${max_iterations})"
-            
-            # 00:00~00:15 사이면 즉시 시작
-            if [[ "$now_hour" == "00" && "$now_minute" -le "15" ]]; then
-              echo "🎯 최적 시간 도달! 예약 시작 (${now_hour}:${now_minute})"
-              break
-            fi
-            
-            # 30초 대기
-            sleep 30
-            iteration=$((iteration + 1))
-          done
-          
-          if [[ $iteration -ge $max_iterations ]]; then
-            echo "⚠️ 최대 대기 시간(20분) 초과 - 강제 시작"
+        # 목표: 00:01:10에 정확히 실행
+        # cron이 00:01:00에 시작하므로 10초만 대기
+        
+        if [[ "$current_hour" == "00" && "$current_minute" == "01" ]]; then
+          # 00:01:xx 시간대
+          if [[ "$current_second" -lt "10" ]]; then
+            # 10초가 되기까지 대기
+            wait_seconds=$((10 - current_second))
+            echo "⏳ ${wait_seconds}초 대기 후 시작 (목표: 00:01:10)"
+            sleep $wait_seconds
+          else
+            echo "✅ 이미 00:01:10 이후 - 바로 시작"
           fi
-          
-        elif [[ "$current_hour" == "00" && "$current_minute" -le "30" ]]; then
-          echo "🎯 이미 최적 시간대 (00:00~00:30) - 바로 시작"
-          
-        elif [[ "$current_hour" == "23" && "$current_minute" -ge "30" ]]; then
-          echo "🎯 적절한 시간대 (23:30~23:44) - 바로 시작"
-          
         else
-          echo "⚠️ 예상 밖 시간대: ${current_hour}:${current_minute}"
-          echo "⚠️ 정상 실행 시간: 23:30~00:30"
-          echo "⚠️ 그래도 예약을 진행합니다 (fallback)"
+          # 예상 외 시간대 (수동 실행 등)
+          echo "⚠️ 예상 밖 시간대: $current_time"
+          echo "📌 그래도 예약을 진행합니다"
         fi
         
         final_time=$(TZ='Asia/Seoul' date '+%H:%M:%S')
