@@ -23,6 +23,12 @@ class PilatesBooking {
         
         // 대기예약 플래그 추가
         this.isWaitingReservation = false;
+        
+        // 동시신청 충돌 플래그 추가
+        this.hasConflictError = false;
+        
+        // 시간초과 플래그 추가
+        this.hasTimeoutError = false;
     }
 
     // 한국 시간(KST) 기준으로 날짜 계산 (정확한 계산)
@@ -67,6 +73,14 @@ class PilatesBooking {
         return days[date.getDay()];
     }
 
+    // 랜덤 지연 추가 (동시신청 충돌 방지)
+    async addRandomDelay() {
+        // 0~3초 사이의 랜덤 지연 (자정 직후 동시 접속 분산)
+        const randomDelay = Math.floor(Math.random() * 3000);
+        await this.log(`⏱️ 동시접속 분산을 위한 랜덤 대기: ${randomDelay}ms`);
+        await new Promise(resolve => setTimeout(resolve, randomDelay));
+    }
+
     async init() {
         try {
             await fs.mkdir('screenshots', { recursive: true });
@@ -79,6 +93,14 @@ class PilatesBooking {
         const targetInfo = this.getTargetDate();
         
         await this.log(`=== 예약 시작: ${kstNow.toLocaleString('ko-KR')} (KST) ===`);
+        
+        // 자정 직후인 경우 랜덤 지연 추가
+        const hour = kstNow.getHours();
+        const minute = kstNow.getMinutes();
+        if (hour === 0 && minute < 5) {
+            await this.addRandomDelay();
+        }
+        
         await this.log(`📅 예약 대상 날짜: ${targetInfo.year}년 ${targetInfo.month}월 ${targetInfo.day}일`);
         await this.log(`🕘 현재 KST 시간: ${kstNow.toLocaleString('ko-KR')}`);
         
@@ -305,6 +327,10 @@ class PilatesBooking {
     async find0930ClassAndBook(page) {
         await this.log('🔍 09:30 수업 찾는 중...');
         
+        // 플래그 초기화
+        this.hasConflictError = false;
+        this.hasTimeoutError = false;
+        
         try {
             await page.waitForSelector('table', { timeout: 5000 }).catch(() => {
                 this.log('⚠️ 테이블 로드 대기 시간 초과');
@@ -342,23 +368,26 @@ class PilatesBooking {
                 if (message.includes('날짜를 선택')) {
                     await dialog.accept();
                     await this.log('⚠️ 날짜 선택 오류 - 재시도 필요');
-                    throw new Error('날짜 선택 오류');
+                    this.hasConflictError = true;
+                    return;
                 }
                 
-                // 동시신청 오류
+                // 동시신청 오류 - throw 대신 플래그 설정
                 if (message.includes('동시신청') || message.includes('잠시 후')) {
                     await dialog.accept();
                     await this.log('⚠️ 동시신청 충돌 - 재시도 필요');
                     this.bookingSuccess = false;
-                    throw new Error('동시신청 충돌');
+                    this.hasConflictError = true;
+                    return;
                 }
                 
-                // 시간 초과 오류
+                // 시간 초과 오류 - throw 대신 플래그 설정
                 if (message.includes('시간초과') || message.includes('time out')) {
                     await dialog.accept();
                     await this.log('⚠️ 시간 초과 - 재시도 필요');
                     this.bookingSuccess = false;
-                    throw new Error('시간 초과');
+                    this.hasTimeoutError = true;
+                    return;
                 }
                 
                 // 예약 성공
@@ -370,17 +399,19 @@ class PilatesBooking {
                     return;
                 }
                 
-                // 타임 선택 오류 - 새로 추가
+                // 타임 선택 오류 - throw 대신 플래그 설정
                 if (message.includes('선택된 타임이 없습니다') || message.includes('예약선택을 하십시오')) {
                     await dialog.accept();
                     await this.log('⚠️ 타임 선택 오류 - 잘못된 시간대 선택됨');
-                    throw new Error('타임 선택 오류');
+                    this.hasConflictError = true;
+                    return;
                 }
                 
                 // 로그인 오류
                 if (message.includes('등록되어 있지 않습니다')) {
                     await dialog.accept();
-                    throw new Error('로그인 정보 오류');
+                    this.hasConflictError = true;
+                    return;
                 }
                 
                 // 기타 다이얼로그
@@ -616,6 +647,23 @@ class PilatesBooking {
                     if (submitSuccess) {
                         await this.log('✅ Submit 완료!');
                         await page.waitForTimeout(2000);
+                        
+                        // 동시신청 오류 체크를 위한 대기
+                        await page.waitForTimeout(1000);
+                        
+                        // 에러 플래그 체크
+                        if (this.hasConflictError) {
+                            await this.log('⚠️ 동시신청 충돌 감지 - 재시도 필요');
+                            page.off('dialog', dialogHandler);
+                            throw new Error('동시신청 충돌');
+                        }
+                        
+                        if (this.hasTimeoutError) {
+                            await this.log('⚠️ 시간초과 감지 - 재시도 필요');
+                            page.off('dialog', dialogHandler);
+                            throw new Error('시간초과');
+                        }
+                        
                         await this.takeScreenshot(page, '06-after-submit');
                     } else {
                         await this.log('⚠️ Submit 버튼을 찾지 못함');
@@ -905,10 +953,17 @@ class PilatesBooking {
                 await this.log(`❌ 시도 ${retryCount}/${this.maxRetries} 실패: ${error.message}`);
                 
                 if (retryCount < this.maxRetries) {
-                    // 동시신청 오류시 더 긴 대기, 타임 선택 오류시 짧은 대기
-                    const delay = error.message.includes('동시신청') ? 3000 :
-                                 error.message.includes('타임 선택') ? 1000 :
-                                 this.retryDelay;
+                    // 동시신청 오류시 랜덤 대기 시간 추가
+                    let delay = this.retryDelay;
+                    if (error.message.includes('동시신청')) {
+                        delay = 3000 + Math.floor(Math.random() * 2000); // 3-5초 랜덤 대기
+                        await this.log(`🎲 동시신청 충돌 - 랜덤 대기: ${delay}ms`);
+                    } else if (error.message.includes('시간초과')) {
+                        delay = 2000;
+                    } else if (error.message.includes('타임 선택')) {
+                        delay = 1000;
+                    }
+                    
                     await this.log(`⏳ ${delay/1000}초 후 재시도...`);
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
