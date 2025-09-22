@@ -1,12 +1,9 @@
-name: 🏋️ 필라테스 자동 예약 v6.0 (사전실행 + 내장대기)
+name: 🏋️ 필라테스 자동 예약 v6.1 (주말 로직 수정 + 단순화)
 
 on:
   schedule:
-    # 23:45에 미리 실행하고 스크립트에서 00:01까지 대기
-    - cron: '45 14 * * *'  # 23:45 KST - 메인 실행 (15분 여유)
-    - cron: '50 14 * * *'  # 23:50 KST - 백업 1 (10분 여유)
-    - cron: '55 14 * * *'  # 23:55 KST - 백업 2 (5분 여유)
-    - cron: '0 15 * * *'   # 00:00 KST - 긴급 백업 (지연 대응)
+    # 매일 23:55에 실행 (단일 스케줄로 통합)
+    - cron: '55 14 * * *'  # 23:55 KST - 메인 실행
   
   workflow_dispatch:
     inputs:
@@ -21,25 +18,19 @@ on:
           - 'test'      # 테스트 모드
           - 'immediate' # 즉시 실행 (대기 없음)
       target_time:
-        description: '목표 실행 시간 (KST, 예: 00:01:30)'
+        description: '목표 실행 시간 (KST, 예: 00:01:00)'
         required: false
-        default: '00:01:30'
-        type: string
-      wait_until:
-        description: '대기 시간 (분, 0=즉시실행)'
-        required: false
-        default: '0'
+        default: '00:01:00'
         type: string
 
 env:
   NODE_VERSION: '20'
   TIMEZONE: 'Asia/Seoul'
-  # 최적화 플래그
   PUPPETEER_SKIP_DOWNLOAD: 'true'
   PUPPETEER_EXECUTABLE_PATH: '/usr/bin/google-chrome-stable'
 
 jobs:
-  # 실행 조건 판단
+  # 실행 조건 판단 (수정됨)
   orchestrator:
     runs-on: ubuntu-latest
     outputs:
@@ -48,141 +39,105 @@ jobs:
       target_date: ${{ steps.decision.outputs.target_date }}
       target_time: ${{ steps.decision.outputs.target_time }}
       wait_minutes: ${{ steps.decision.outputs.wait_minutes }}
-      is_weekend: ${{ steps.decision.outputs.is_weekend }}
+      skip_reason: ${{ steps.decision.outputs.skip_reason }}
       current_time: ${{ steps.decision.outputs.current_time }}
-      estimated_start: ${{ steps.decision.outputs.estimated_start }}
     
     steps:
-    - name: 📊 실행 조건 및 타이밍 분석
+    - name: 📊 실행 조건 분석 (주말 로직 수정)
       id: decision
       run: |
-        echo "=== 📊 사전실행 워크플로우 분석 ==="
+        echo "=== 📊 워크플로우 분석 v6.1 ==="
         
-        # 현재 KST 시간 계산
-        current_utc=$(date -u '+%Y-%m-%d %H:%M:%S')
+        # 현재 KST 시간
         current_kst=$(TZ='${{ env.TIMEZONE }}' date '+%Y-%m-%d %H:%M:%S')
         current_hour=$(TZ='${{ env.TIMEZONE }}' date '+%H')
         current_minute=$(TZ='${{ env.TIMEZONE }}' date '+%M')
-        current_second=$(TZ='${{ env.TIMEZONE }}' date '+%S')
+        current_day=$(TZ='${{ env.TIMEZONE }}' date '+%u')  # 1=월, 7=일
         
-        echo "현재 UTC: $current_utc"
         echo "현재 KST: $current_kst"
-        echo "current_time=${current_hour}:${current_minute}:${current_second}" >> $GITHUB_OUTPUT
+        echo "현재 요일: $current_day (1=월요일, 7=일요일)"
+        echo "current_time=${current_hour}:${current_minute}" >> $GITHUB_OUTPUT
         
-        # 스케줄 정보 분석
-        schedule_event="${{ github.event.schedule }}"
+        # 수동 실행 여부
         workflow_dispatch="${{ github.event_name == 'workflow_dispatch' }}"
         mode="${{ github.event.inputs.mode || 'auto' }}"
-        target_time="${{ github.event.inputs.target_time || '00:01:30' }}"
-        wait_input="${{ github.event.inputs.wait_until || '0' }}"
+        target_time="${{ github.event.inputs.target_time || '00:01:00' }}"
         
-        echo "스케줄 이벤트: $schedule_event"
-        echo "수동 실행: $workflow_dispatch"
-        echo "실행 모드: $mode"
-        echo "목표 시간: $target_time"
-        
-        # 7일 후 날짜 및 주말 체크
+        # 7일 후 날짜 계산
         target_date=$(TZ='${{ env.TIMEZONE }}' date -d '+7 days' '+%Y-%m-%d')
         target_day=$(TZ='${{ env.TIMEZONE }}' date -d '+7 days' '+%u')
-        is_weekend="false"
-        
-        if [[ "$target_day" == "6" || "$target_day" == "7" ]]; then
-          is_weekend="true"
-        fi
         
         echo "target_date=$target_date" >> $GITHUB_OUTPUT
         echo "target_time=$target_time" >> $GITHUB_OUTPUT
-        echo "is_weekend=$is_weekend" >> $GITHUB_OUTPUT
-        echo "📅 예약 대상: $target_date (주말: $is_weekend)"
+        echo "📅 7일 후 예약 대상: $target_date (요일: $target_day)"
         
-        # 실행 조건 결정
+        # 실행 여부 결정 (주말 로직 수정!)
         should_run="false"
         execution_mode="skip"
-        wait_minutes="0"
+        skip_reason=""
+        wait_minutes="6"  # 약 6분 대기 (23:55 → 00:01)
+        
+        # 핵심 로직: 현재 요일 기준으로 판단
+        # 금요일(5) 23:55 → 토요일 예약 → 스킵
+        # 토요일(6) 23:55 → 일요일 예약 → 스킵  
+        # 일요일(7) 23:55 → 월요일 예약 → 실행
+        # 평일(1-4) 23:55 → 평일 예약 → 실행
         
         if [[ "$workflow_dispatch" == "true" ]]; then
           # 수동 실행
-          if [[ "$mode" == "force" ]] || [[ "$is_weekend" == "false" ]]; then
+          if [[ "$mode" == "force" ]]; then
             should_run="true"
-            
-            if [[ "$mode" == "immediate" ]]; then
-              execution_mode="immediate"
-              wait_minutes="0"
+            execution_mode="manual-force"
+            echo "🔧 수동 강제 실행 모드"
+          elif [[ "$mode" == "test" ]]; then
+            should_run="true"
+            execution_mode="test"
+            echo "🧪 테스트 모드"
+          elif [[ "$mode" == "immediate" ]]; then
+            should_run="true"
+            execution_mode="immediate"
+            wait_minutes="0"
+            echo "🚀 즉시 실행 모드"
+          else
+            # auto 모드 - 요일 체크
+            if [[ "$current_day" -eq 5 ]] || [[ "$current_day" -eq 6 ]]; then
+              skip_reason="금/토요일은 주말 예약이므로 스킵"
+              echo "🚫 $skip_reason"
             else
-              execution_mode="manual"
-              wait_minutes="$wait_input"
+              should_run="true"
+              execution_mode="manual-auto"
             fi
           fi
         else
-          # 스케줄 실행
-          if [[ "$is_weekend" == "false" ]]; then
+          # 스케줄 실행 - 요일 체크
+          if [[ "$current_day" -eq 5 ]]; then
+            skip_reason="금요일 → 토요일 예약 스킵"
+            echo "🚫 $skip_reason"
+          elif [[ "$current_day" -eq 6 ]]; then
+            skip_reason="토요일 → 일요일 예약 스킵"
+            echo "🚫 $skip_reason"
+          else
+            # 일요일(7) 또는 평일(1-4)
             should_run="true"
-            
-            case "$schedule_event" in
-              "45 14 * * *")  # 23:45 - 메인 실행
-                execution_mode="main"
-                # 00:01:30까지 대기 시간 계산 (분 단위)
-                target_hour=0
-                target_minute=1
-                target_second=30
-                
-                # 현재 시간을 초로 변환
-                current_total_seconds=$((current_hour * 3600 + current_minute * 60 + current_second))
-                
-                # 자정을 넘어가는 경우 고려 (23시대 → 00시대)
-                if [[ "$current_hour" == "23" ]]; then
-                  # 다음날 00:01:30까지의 시간 계산
-                  target_total_seconds=$((target_hour * 3600 + target_minute * 60 + target_second + 24 * 3600))
-                  wait_seconds=$((target_total_seconds - current_total_seconds))
-                else
-                  # 같은 날 내에서의 계산
-                  target_total_seconds=$((target_hour * 3600 + target_minute * 60 + target_second))
-                  wait_seconds=$((target_total_seconds - current_total_seconds))
-                fi
-                
-                # 음수면 0으로 설정 (이미 지난 시간)
-                if [[ $wait_seconds -lt 0 ]]; then
-                  wait_seconds=0
-                fi
-                
-                wait_minutes=$((wait_seconds / 60))
-                echo "⏳ 대기 시간: ${wait_minutes}분 (${wait_seconds}초)"
-                ;;
-              "50 14 * * *")  # 23:50 - 백업 1
-                execution_mode="backup1"
-                wait_minutes=11  # 대략 11분 대기
-                ;;
-              "55 14 * * *")  # 23:55 - 백업 2  
-                execution_mode="backup2"
-                wait_minutes=6   # 대략 6분 대기
-                ;;
-              "0 15 * * *")   # 00:00 - 긴급 백업
-                execution_mode="emergency"
-                wait_minutes=1   # 1분만 대기
-                ;;
-            esac
+            execution_mode="scheduled"
+            echo "✅ 평일 예약 진행 (일요일→월요일 포함)"
           fi
         fi
         
         echo "should_run=$should_run" >> $GITHUB_OUTPUT
         echo "execution_mode=$execution_mode" >> $GITHUB_OUTPUT
         echo "wait_minutes=$wait_minutes" >> $GITHUB_OUTPUT
-        
-        # 예상 시작 시간 계산
-        if [[ "$wait_minutes" -gt 0 ]]; then
-          estimated_start=$(TZ='${{ env.TIMEZONE }}' date -d "+${wait_minutes} minutes" '+%H:%M:%S')
-        else
-          estimated_start="즉시"
-        fi
-        echo "estimated_start=$estimated_start" >> $GITHUB_OUTPUT
+        echo "skip_reason=$skip_reason" >> $GITHUB_OUTPUT
         
         echo "✅ 분석 완료:"
-        echo "  - should_run: $should_run"
-        echo "  - mode: $execution_mode" 
-        echo "  - wait_minutes: $wait_minutes"
-        echo "  - estimated_start: $estimated_start"
+        echo "  - 실행 여부: $should_run"
+        echo "  - 실행 모드: $execution_mode"
+        echo "  - 대기 시간: ${wait_minutes}분"
+        if [[ "$should_run" == "false" ]]; then
+          echo "  - 스킵 이유: $skip_reason"
+        fi
 
-  # 메인 예약 실행 (사전 실행 + 내장 대기)
+  # 메인 예약 실행
   booking-execution:
     needs: orchestrator
     runs-on: ubuntu-latest
@@ -191,280 +146,123 @@ jobs:
     steps:
     - name: 📁 체크아웃
       uses: actions/checkout@v4
-      with:
-        fetch-depth: 1
 
-    - name: 🔧 Node.js 설정 및 의존성 설치
+    - name: 🔧 Node.js 설정
       uses: actions/setup-node@v4
       with:
         node-version: ${{ env.NODE_VERSION }}
 
-    - name: 📦 package-lock.json 생성 및 의존성 설치
+    - name: 📦 의존성 설치 (최적화)
       run: |
-        echo "🔧 의존성 준비 시작 - $(TZ='${{ env.TIMEZONE }}' date '+%H:%M:%S')"
-        
-        # package-lock.json 생성
         npm install --package-lock-only
-        
-        # 의존성 설치 (최적화)
-        npm ci \
-          --prefer-offline \
-          --no-audit \
-          --no-fund \
-          --progress=false
-        
-        echo "✅ 의존성 준비 완료 - $(TZ='${{ env.TIMEZONE }}' date '+%H:%M:%S')"
+        npm ci --prefer-offline --no-audit --no-fund --progress=false
 
-    - name: 🌐 시스템 최적화
+    - name: ⏰ 정밀 대기 (00:01까지)
+      id: timing
       run: |
-        echo "⚡ 시스템 최적화 시작"
-        
-        # Chrome 버전 확인
-        google-chrome --version
-        
-        # 메모리 정리
-        sudo sysctl vm.drop_caches=3 || true
-        
-        # 네트워크 최적화
-        echo 'net.core.rmem_max = 16777216' | sudo tee -a /etc/sysctl.conf || true
-        echo 'net.core.wmem_max = 16777216' | sudo tee -a /etc/sysctl.conf || true
-        sudo sysctl -p || true
-        
-        echo "✅ 시스템 최적화 완료"
-
-    - name: ⏰ 정밀 대기 및 타이밍 제어
-      id: timing-control
-      run: |
-        execution_mode="${{ needs.orchestrator.outputs.execution_mode }}"
         wait_minutes="${{ needs.orchestrator.outputs.wait_minutes }}"
         target_time="${{ needs.orchestrator.outputs.target_time }}"
         
-        echo "🕐 실행 모드: $execution_mode"
         echo "⏰ 대기 시간: ${wait_minutes}분"
         echo "🎯 목표 시간: $target_time"
         
-        current_kst=$(TZ='${{ env.TIMEZONE }}' date '+%H:%M:%S')
-        echo "🕐 현재 KST: $current_kst"
-        
-        case "$execution_mode" in
-          "immediate")
-            echo "🚀 즉시 실행 모드"
-            ;;
-          "main"|"backup1"|"backup2")
-            if [[ "$wait_minutes" -gt 0 ]]; then
-              echo "⏳ ${wait_minutes}분 정밀 대기 시작..."
-              
-              # 정밀 대기 (1분 단위로 진행 상황 표시)
-              for ((i=wait_minutes; i>0; i--)); do
-                current_time=$(TZ='${{ env.TIMEZONE }}' date '+%H:%M:%S')
-                echo "⏳ ${i}분 남음 (현재: $current_time)"
-                
-                # 마지막 1분은 초 단위로 세밀하게 제어
-                if [[ $i -eq 1 ]]; then
-                  echo "🎯 마지막 1분 - 초 단위 정밀 제어"
-                  
-                  # 목표 시간 파싱
-                  target_hour=$(echo $target_time | cut -d: -f1)
-                  target_minute=$(echo $target_time | cut -d: -f2)
-                  target_second=$(echo $target_time | cut -d: -f3)
-                  
-                  # 목표 시간까지 정밀 대기
-                  while true; do
-                    current_hour=$(TZ='${{ env.TIMEZONE }}' date '+%H')
-                    current_minute=$(TZ='${{ env.TIMEZONE }}' date '+%M')
-                    current_second=$(TZ='${{ env.TIMEZONE }}' date '+%S')
-                    
-                    # 목표 시간 도달 확인
-                    if [[ "$current_hour" == "0$target_hour" || "$current_hour" == "$target_hour" ]] && \
-                       [[ "$current_minute" == "0$target_minute" || "$current_minute" == "$target_minute" ]] && \
-                       [[ "$current_second" -ge "$target_second" ]]; then
-                      break
-                    fi
-                    
-                    # 목표 시간이 지났으면 즉시 실행
-                    current_total=$((current_hour * 3600 + current_minute * 60 + current_second))
-                    target_total=$((target_hour * 3600 + target_minute * 60 + target_second))
-                    
-                    if [[ $current_total -gt $target_total ]]; then
-                      echo "⚠️ 목표 시간 경과 - 즉시 실행"
-                      break
-                    fi
-                    
-                    remaining=$((target_total - current_total))
-                    if [[ $remaining -le 10 ]]; then
-                      echo "🔥 ${remaining}초 남음..."
-                    fi
-                    
-                    sleep 1
-                  done
-                  
-                  break
-                else
-                  sleep 60
-                fi
-              done
-            fi
-            ;;
-          "emergency")
-            echo "🚨 긴급 백업 모드 - 1분 대기"
+        if [[ "$wait_minutes" -gt 0 ]]; then
+          # 목표 시간 파싱
+          IFS=':' read -r target_hour target_minute target_second <<< "$target_time"
+          target_hour=${target_hour:-0}
+          target_minute=${target_minute:-1}
+          target_second=${target_second:-0}
+          
+          echo "⏳ 목표 시간까지 대기 시작..."
+          
+          # 분 단위 대기
+          for ((i=wait_minutes; i>1; i--)); do
+            echo "⏳ ${i}분 남음..."
             sleep 60
-            ;;
-          "manual")
-            if [[ "$wait_minutes" -gt 0 ]]; then
-              echo "🖱️ 수동 실행 - ${wait_minutes}분 대기"
-              sleep $((wait_minutes * 60))
+          done
+          
+          # 마지막 1분은 초 단위 정밀 제어
+          echo "🎯 마지막 1분 - 초 단위 정밀 제어"
+          while true; do
+            current_hour=$(TZ='${{ env.TIMEZONE }}' date '+%-H')
+            current_minute=$(TZ='${{ env.TIMEZONE }}' date '+%-M')
+            current_second=$(TZ='${{ env.TIMEZONE }}' date '+%-S')
+            
+            # 목표 시간 도달 확인
+            if [[ "$current_hour" -eq "$target_hour" ]] && \
+               [[ "$current_minute" -eq "$target_minute" ]] && \
+               [[ "$current_second" -ge "$target_second" ]]; then
+              break
             fi
-            ;;
-        esac
+            
+            # 목표 시간 경과 확인
+            current_total=$((current_hour * 3600 + current_minute * 60 + current_second))
+            target_total=$((target_hour * 3600 + target_minute * 60 + target_second))
+            
+            if [[ "$current_hour" -gt 0 ]] && [[ "$target_hour" -eq 0 ]]; then
+              # 자정을 넘어간 경우 처리
+              break
+            elif [[ $current_total -gt $target_total ]]; then
+              echo "⚠️ 목표 시간 경과 - 즉시 실행"
+              break
+            fi
+            
+            remaining=$((target_total - current_total))
+            if [[ $remaining -le 10 ]] && [[ $remaining -gt 0 ]]; then
+              echo "🔥 ${remaining}초..."
+            fi
+            
+            sleep 1
+          done
+        fi
         
         final_time=$(TZ='${{ env.TIMEZONE }}' date '+%H:%M:%S.%3N')
-        echo "🚀 대기 완료 - 예약 실행 시작: $final_time"
-        echo "start_time=$final_time" >> $GITHUB_OUTPUT
-
-    - name: 🔍 중복 실행 방지 체크
-      id: duplicate-check
-      if: |
-        needs.orchestrator.outputs.execution_mode == 'backup1' || 
-        needs.orchestrator.outputs.execution_mode == 'backup2' ||
-        needs.orchestrator.outputs.execution_mode == 'emergency'
-      run: |
-        echo "🔍 이전 실행 성공 여부 확인..."
-        
-        # GitHub API로 최근 1시간 내 워크플로우 실행 결과 확인
-        recent_runs=$(curl -s \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Accept: application/vnd.github.v3+json" \
-          "https://api.github.com/repos/${{ github.repository }}/actions/runs?created=>$(date -d '1 hour ago' -Iseconds)&per_page=10" \
-          | jq -r '.workflow_runs[] | select(.name == "${{ github.workflow }}") | "\(.conclusion):\(.status)"' 2>/dev/null || echo "")
-        
-        success_count=$(echo "$recent_runs" | grep -c "success:completed" 2>/dev/null || echo "0")
-        
-        echo "📊 최근 1시간 내 성공한 실행: ${success_count}회"
-        echo "🔍 최근 실행 상태들:"
-        echo "$recent_runs" | head -5
-        
-        if [[ "$success_count" -gt 0 ]]; then
-          echo "✅ 이미 성공한 실행 발견 - 중복 실행 방지"
-          echo "skip_execution=true" >> $GITHUB_OUTPUT
-        else
-          echo "🎯 성공한 실행 없음 - 백업 실행 진행"
-          echo "skip_execution=false" >> $GITHUB_OUTPUT
-        fi
+        echo "🚀 예약 실행 시작: $final_time"
 
     - name: 🏋️ 필라테스 예약 실행
-      if: steps.duplicate-check.outputs.skip_execution != 'true'
       env:
         PILATES_USERNAME: ${{ secrets.PILATES_USERNAME }}
         PILATES_PASSWORD: ${{ secrets.PILATES_PASSWORD }}
-        TEST_MODE: ${{ github.event.inputs.mode == 'test' && 'true' || 'false' }}
-        GITHUB_ACTIONS: 'true'
-        NODE_ENV: 'production'
-        # 실행 정보 전달
+        TEST_MODE: ${{ needs.orchestrator.outputs.execution_mode == 'test' && 'true' || 'false' }}
+        IMMEDIATE_MODE: ${{ needs.orchestrator.outputs.execution_mode == 'immediate' && 'true' || 'false' }}
         EXECUTION_MODE: ${{ needs.orchestrator.outputs.execution_mode }}
-        TIMING_INFO: ${{ steps.timing-control.outputs.start_time }}
         TARGET_TIME: ${{ needs.orchestrator.outputs.target_time }}
-        # 성능 최적화
-        UV_THREADPOOL_SIZE: 16
-        NODE_OPTIONS: '--max-old-space-size=4096'
+        GITHUB_ACTIONS: 'true'
       run: |
-        echo "🚀 필라테스 예약 실행 시작"
-        echo "📊 실행 정보:"
-        echo "  - 모드: $EXECUTION_MODE"
-        echo "  - 시작 시간: $TIMING_INFO"
-        echo "  - 목표 시간: $TARGET_TIME"
-        echo "  - 워크플로우: ${{ github.run_number }}"
+        echo "🚀 필라테스 예약 실행"
+        echo "📊 실행 모드: $EXECUTION_MODE"
         
-        # 최종 시스템 최적화
-        sudo sysctl vm.drop_caches=1 || true
-        
-        # 예약 실행 (타임아웃 10분)
         timeout 600 npm run book || {
           exit_code=$?
-          case $exit_code in
-            124)
-              echo "⏰ 실행 시간 초과 (10분) - 서버 응답 지연"
-              ;;
-            *)
-              echo "❌ 예약 실행 실패 (종료 코드: $exit_code)"
-              ;;
-          esac
+          if [[ $exit_code -eq 124 ]]; then
+            echo "⏰ 타임아웃 (10분)"
+          else
+            echo "❌ 실행 실패 (코드: $exit_code)"
+          fi
           exit $exit_code
         }
-        
-        completion_time=$(TZ='${{ env.TIMEZONE }}' date '+%H:%M:%S.%3N')
-        echo "✅ 예약 실행 완료: $completion_time"
 
     - name: 📊 실행 결과 분석
       if: always()
       run: |
-        echo "=== 📊 실행 결과 분석 ==="
-        
-        execution_mode="${{ needs.orchestrator.outputs.execution_mode }}"
-        start_time="${{ steps.timing-control.outputs.start_time }}"
-        current_time=$(TZ='${{ env.TIMEZONE }}' date '+%H:%M:%S.%3N')
-        
-        echo "🕐 실행 정보:"
-        echo "  - 실행 모드: $execution_mode"
-        echo "  - 시작 시간: $start_time"
-        echo "  - 완료 시간: $current_time"
-        echo "  - 워크플로우: ${{ github.run_number }}"
-        echo "  - 목표 날짜: ${{ needs.orchestrator.outputs.target_date }}"
-        
-        # 결과 파일 확인 및 분석
         result_file="booking-result.json"
-        if [[ "${{ github.event.inputs.mode }}" == "test" ]]; then
+        if [[ "${{ needs.orchestrator.outputs.execution_mode }}" == "test" ]]; then
           result_file="test-result.json"
         fi
         
         if [ -f "$result_file" ]; then
-          echo ""
-          echo "✅ 결과 파일 발견: $result_file"
-          echo "📄 결과 내용:"
+          echo "📄 결과:"
           cat "$result_file" | jq '.' 2>/dev/null || cat "$result_file"
-          
-          # 상태 분석
-          status=$(cat "$result_file" | jq -r '.status' 2>/dev/null || echo "UNKNOWN")
-          
-          echo ""
-          echo "📋 상태 분석: $status"
-          case "$status" in
-            "SUCCESS")
-              echo "🎉 일반 예약 성공!"
-              ;;
-            "WAITING") 
-              echo "⏳ 대기예약 성공!"
-              ;;
-            "ALREADY_BOOKED")
-              echo "✅ 이미 일반예약 완료됨"
-              ;;
-            "ALREADY_WAITING")
-              echo "✅ 이미 대기예약 완료됨"
-              ;;
-            "UNAVAILABLE")
-              echo "❌ 예약 불가 (정원 초과 또는 시간 경과)"
-              echo "💡 GitHub Actions 지연보다 빠른 실행으로 해결"
-              ;;
-            "WEEKEND_SKIP")
-              echo "📅 주말 건너뛰기"
-              ;;
-            "TEST")
-              echo "🧪 테스트 모드 완료"
-              ;;
-            *)
-              echo "❓ 알 수 없는 상태: $status"
-              ;;
-          esac
         else
-          echo "❌ 결과 파일 없음 - 실행 실패"
-          ls -la *.json 2>/dev/null || echo "JSON 파일 없음"
+          echo "❌ 결과 파일 없음"
           exit 1
         fi
 
-    - name: 📸 결과 아티팩트 업로드
+    - name: 📸 아티팩트 업로드
       if: always()
       uses: actions/upload-artifact@v4
       with:
-        name: booking-results-${{ needs.orchestrator.outputs.execution_mode }}-${{ github.run_number }}
+        name: booking-results-${{ github.run_number }}
         path: |
           screenshots/
           logs/
@@ -476,63 +274,11 @@ jobs:
   weekend-notification:
     needs: orchestrator
     runs-on: ubuntu-latest
-    if: |
-      needs.orchestrator.outputs.should_run == 'false' && 
-      needs.orchestrator.outputs.is_weekend == 'true'
+    if: needs.orchestrator.outputs.should_run == 'false'
     
     steps:
-    - name: 🚫 주말 스킵 알림
+    - name: 🚫 스킵 알림
       run: |
-        echo "📅 예약 대상 날짜: ${{ needs.orchestrator.outputs.target_date }}"
-        echo "🚫 주말이므로 예약을 건너뜁니다"
-        echo "💡 강제 실행하려면 workflow_dispatch에서 mode를 'force'로 설정하세요"
-
-  # 전체 실행 요약
-  execution-summary:
-    needs: [orchestrator, booking-execution]
-    runs-on: ubuntu-latest
-    if: always() && needs.orchestrator.outputs.should_run == 'true'
-    
-    steps:
-    - name: 📊 최종 실행 요약
-      run: |
-        echo "=== 📊 필라테스 예약 최종 요약 ==="
-        echo ""
-        
-        execution_mode="${{ needs.orchestrator.outputs.execution_mode }}"
-        target_date="${{ needs.orchestrator.outputs.target_date }}"
-        target_time="${{ needs.orchestrator.outputs.target_time }}"
-        wait_minutes="${{ needs.orchestrator.outputs.wait_minutes }}"
-        estimated_start="${{ needs.orchestrator.outputs.estimated_start }}"
-        
-        echo "🎯 예약 정보:"
-        echo "  - 목표 날짜: $target_date"
-        echo "  - 목표 시간: $target_time"
-        echo "  - 실행 모드: $execution_mode"
-        echo "  - 대기 시간: ${wait_minutes}분"
-        echo "  - 예상 시작: $estimated_start"
-        echo "  - 워크플로우: ${{ github.run_number }}"
-        echo ""
-        
-        exec_status="${{ needs.booking-execution.result }}"
-        echo "📈 실행 결과: $exec_status"
-        
-        if [[ "$exec_status" == "success" ]]; then
-          echo "🎉 예약 프로세스 성공!"
-          echo "✅ GitHub Actions 지연 문제 해결됨"
-        elif [[ "$exec_status" == "failure" ]]; then
-          echo "❌ 예약 실행 실패"
-          echo "🔄 다음 백업 스케줄에서 재시도됩니다"
-        else
-          echo "⏳ 실행 중이거나 스킵됨"
-        fi
-        
-        echo ""
-        echo "💡 v6.0 개선사항:"
-        echo "  ✅ 23:45 사전 실행으로 지연 방지"
-        echo "  ✅ 내장 대기 시스템으로 정밀 타이밍"
-        echo "  ✅ 다중 백업으로 안정성 확보"
-        echo "  ✅ 중복 실행 방지로 리소스 절약"
-        echo "  ✅ 초 단위 정밀 제어"
-        echo ""
-        echo "📊 예상 성공률: 99%+ (GitHub Actions 지연 완전 극복)"
+        echo "📅 예약 대상: ${{ needs.orchestrator.outputs.target_date }}"
+        echo "🚫 스킵 이유: ${{ needs.orchestrator.outputs.skip_reason }}"
+        echo "💡 강제 실행: workflow_dispatch에서 mode를 'force'로 설정"
