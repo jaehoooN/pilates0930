@@ -1,4 +1,4 @@
-// 필라테스 자동 예약 시스템 v6.0 - 사전실행 + 내장대기 통합
+// 필라테스 자동 예약 시스템 v6.1 - 주말 로직 수정 버전
 require('dotenv').config();
 
 const puppeteer = require('puppeteer');
@@ -24,7 +24,7 @@ class PreciseTimingPilatesBooking {
         this.debugMode = process.env.DEBUG === 'true';
         
         // 타이밍 설정
-        this.targetTime = process.env.TARGET_TIME || '00:01:30';
+        this.targetTime = process.env.TARGET_TIME || '00:01:00';
         this.maxWaitMinutes = parseInt(process.env.MAX_WAIT_MINUTES) || 20;
         
         // 상태 플래그
@@ -111,7 +111,7 @@ class PreciseTimingPilatesBooking {
         }
     }
 
-    // 초기화 및 환경 확인
+    // 초기화 및 환경 확인 (수정됨 - 주말 로직)
     async init() {
         try {
             await fs.mkdir('screenshots', { recursive: true });
@@ -123,35 +123,74 @@ class PreciseTimingPilatesBooking {
         const kstNow = this.getKSTDate();
         const targetInfo = this.getTargetDate();
         
-        await this.log(`=== 필라테스 자동 예약 시스템 v6.0 시작 ===`);
+        await this.log(`=== 필라테스 자동 예약 시스템 v6.1 시작 ===`);
         await this.log(`🕐 현재 KST: ${this.getKSTTimeString()}`);
         await this.log(`🎯 실행 모드: ${this.executionMode}`);
         await this.log(`⏰ 타이밍 정보: ${this.timingInfo}`);
         await this.log(`📅 예약 대상: ${targetInfo.year}년 ${targetInfo.month}월 ${targetInfo.day}일 (${this.getDayName(targetInfo.dateObject)})`);
         
-        // 주말 체크
-        if (targetInfo.isWeekend && !this.testMode && this.executionMode !== 'force') {
-            await this.log(`🚫 주말(${this.getDayName(targetInfo.dateObject)}) - 예약 스킵`);
-            
-            const resultInfo = {
-                timestamp: this.getKSTDate().toISOString(),
-                date: `${targetInfo.year}-${targetInfo.month}-${targetInfo.day}`,
-                dayOfWeek: this.getDayName(targetInfo.dateObject),
-                status: 'WEEKEND_SKIP',
-                message: `주말(${this.getDayName(targetInfo.dateObject)}) 예약 건너뛰기`,
-                executionMode: this.executionMode,
-                timingInfo: this.timingInfo,
-                githubActions: this.isGitHubActions
-            };
-            
-            await this.saveResult(resultInfo);
-            process.exit(0);
+        // 주말 체크 로직 수정 - 현재 요일 기준으로 판단
+        const currentDayOfWeek = kstNow.getDay(); // 0=일, 1=월, ... 6=토
+        const currentDayName = this.getDayName(kstNow);
+        
+        await this.log(`📅 현재 요일: ${currentDayName} (${currentDayOfWeek})`);
+        
+        // 금요일(5) 또는 토요일(6)에 실행되면 스킵
+        // 금요일 23:55 → 다음날(토요일) 예약 → 스킵
+        // 토요일 23:55 → 다음날(일요일) 예약 → 스킵
+        // 일요일 23:55 → 다음날(월요일) 예약 → 실행!
+        
+        if (!this.testMode && this.executionMode !== 'force' && this.executionMode !== 'manual-force') {
+            if (currentDayOfWeek === 5) {
+                await this.log(`🚫 금요일 실행 - 토요일 예약이므로 스킵`);
+                
+                const resultInfo = {
+                    timestamp: this.getKSTDate().toISOString(),
+                    date: `${targetInfo.year}-${targetInfo.month}-${targetInfo.day}`,
+                    dayOfWeek: this.getDayName(targetInfo.dateObject),
+                    currentDay: currentDayName,
+                    status: 'WEEKEND_SKIP',
+                    message: '금요일 → 토요일 예약 스킵',
+                    executionMode: this.executionMode,
+                    timingInfo: this.timingInfo,
+                    githubActions: this.isGitHubActions
+                };
+                
+                await this.saveResult(resultInfo);
+                process.exit(0);
+                
+            } else if (currentDayOfWeek === 6) {
+                await this.log(`🚫 토요일 실행 - 일요일 예약이므로 스킵`);
+                
+                const resultInfo = {
+                    timestamp: this.getKSTDate().toISOString(),
+                    date: `${targetInfo.year}-${targetInfo.month}-${targetInfo.day}`,
+                    dayOfWeek: this.getDayName(targetInfo.dateObject),
+                    currentDay: currentDayName,
+                    status: 'WEEKEND_SKIP',
+                    message: '토요일 → 일요일 예약 스킵',
+                    executionMode: this.executionMode,
+                    timingInfo: this.timingInfo,
+                    githubActions: this.isGitHubActions
+                };
+                
+                await this.saveResult(resultInfo);
+                process.exit(0);
+            }
         }
         
-        await this.log(`✅ 평일 확인 - 예약 진행`);
+        if (currentDayOfWeek === 0) {
+            await this.log(`✅ 일요일 실행 - 월요일 예약 진행`);
+        } else if (currentDayOfWeek >= 1 && currentDayOfWeek <= 4) {
+            await this.log(`✅ 평일 실행 - 예약 진행`);
+        } else if (this.testMode) {
+            await this.log(`🧪 테스트 모드 - 주말 체크 무시`);
+        } else if (this.executionMode === 'force' || this.executionMode === 'manual-force') {
+            await this.log(`🔧 강제 실행 모드 - 주말 체크 무시`);
+        }
         
         if (this.testMode) {
-            await this.log('🧪 테스트 모드 실행');
+            await this.log('🧪 테스트 모드 실행 중');
         }
         
         if (this.immediateMode) {
@@ -159,7 +198,7 @@ class PreciseTimingPilatesBooking {
         }
     }
 
-    // 정밀 대기 시스템 (핵심 기능)
+    // 정밀 대기 시스템
     async waitUntilTargetTime() {
         if (this.immediateMode) {
             await this.log('🚀 즉시 실행 모드 - 대기 생략');
@@ -267,14 +306,14 @@ class PreciseTimingPilatesBooking {
             const currentTotal = currentHour * 3600 + currentMinute * 60 + currentSecond;
             const targetTotal = targetHour * 3600 + targetMinute * 60 + targetSecond;
             
-            if (currentTotal > targetTotal) {
+            if (currentTotal > targetTotal && currentHour < 23) {
                 await this.log('⚠️ 목표 시간 경과 - 즉시 실행');
                 break;
             }
             
             const remaining = targetTotal - currentTotal;
             
-            if (remaining <= 10) {
+            if (remaining <= 10 && remaining > 0) {
                 await this.log(`🔥 ${remaining}초 남음...`);
                 await new Promise(resolve => setTimeout(resolve, 200)); // 200ms 대기
             } else if (remaining <= 30) {
@@ -296,7 +335,7 @@ class PreciseTimingPilatesBooking {
         await this.log(`🚀 예약 실행 시작: ${this.getKSTTimeString()}`);
     }
 
-    // 스크린샷 (조건부 최적화)
+    // 스크린샷
     async takeScreenshot(page, name) {
         if (this.optimizations.skipNonEssentialScreenshots && name.includes('optional')) {
             return null;
@@ -463,7 +502,7 @@ class PreciseTimingPilatesBooking {
         }
     }
 
-    // 09:30 수업 검색 및 예약 (최적화)
+    // 09:30 수업 검색 및 예약
     async find0930ClassAndBook(page) {
         await this.log('🔍 09:30 수업 검색 및 예약...');
         
@@ -479,7 +518,7 @@ class PreciseTimingPilatesBooking {
             
             await this.takeScreenshot(page, '04-time-table');
             
-            // 다이얼로그 핸들러 설정 (중요)
+            // 다이얼로그 핸들러 설정
             let dialogHandled = false;
             const dialogHandler = async (dialog) => {
                 const message = dialog.message();
@@ -745,7 +784,7 @@ class PreciseTimingPilatesBooking {
             // 추가 메타데이터
             const enhancedResult = {
                 ...resultInfo,
-                version: '6.0.0',
+                version: '6.1.0',
                 waitingStartTime: this.waitingStartTime?.toISOString(),
                 actualStartTime: this.actualStartTime?.toISOString(),
                 executionDuration: this.actualStartTime && this.waitingStartTime ? 
@@ -771,7 +810,7 @@ class PreciseTimingPilatesBooking {
     async run() {
         await this.init();
         
-        // 정밀 대기 실행 (핵심!)
+        // 정밀 대기 실행
         await this.waitUntilTargetTime();
         
         let retryCount = 0;
